@@ -171,9 +171,10 @@ hklpy2.creator:
 #  prefix: "6idb1:LS340:TC1:"
 #  labels: ["lakeshore", "baseline"]
 
-# id6_b.devices.lambda_detector.Lambda250kDetector:
-# - name: lambda250k
-#   prefix: "s6lambda1:"
+id6_b.devices.lambda_detector.Lambda250kDetector:
+- name: lambda250k
+  prefix: "s6lambda1:"
+  labels: ["detector", "detectors", "baseline"]
 #   labels: ["area_detector", "detectors"]
 
 # apstools.devices.ad_creator:

@@ -74,9 +74,10 @@ Key device groups currently active:
 | `id6_b.devices.aps_status.StatusAPS` | APS machine status (read-only) | `status_aps` |
 | `apstools.devices.mb_creator` | CRL (10 lenses) + Mirror1 motor bundles | `crl`, `mirror1` |
 | `hklpy2.creator` | E6C diffractometers (hkl, psi, q2 engines) | `psic_sim`, `psic`, `psic_psi`, `psic_q` |
+| `id6_b.devices.lambda_detector.Lambda250kDetector` | Lambda 250K area detector | `lambda250k` |
 | `apstools.devices.SimulatedApsPssShutterWithStatus` | Simulated shutter | `shutter` |
 
-Several devices are **commented out** in `devices.yml` pending fixes or future work: `lakeshore340`, `lambda250k`.
+Several devices are **commented out** in `devices.yml` pending fixes or future work: `lakeshore340`.
 
 ### Custom device modules (`src/id6_b/devices/`)
 
