@@ -1,5 +1,25 @@
 # Guarneri-style device YAML configuration
 
+id6_b.devices.monochromator.MonoDevice:
+- name: mono
+  prefix: "6ida1:"
+  labels: ["mono", "energy device", "baseline"]
+
+id6_b.devices.energy_device.EnergySignal:
+- name: energy
+  mono_name: "mono"
+  labels: ["energy device", "baseline"]
+
+id6_b.devices.aps_undulator.PolarUndulatorPair:
+- name: undulators
+  prefix: "S06ID:"
+  labels: ["source", "energy device", "baseline"]
+
+id6_b.devices.aps_status.StatusAPS:
+- name: status_aps
+  prefix: ""
+  labels: ["source", "status", "baseline"]
+
 apstools.devices.mb_creator:
 - name: crl
   prefix: "6idbSoft:TRANS:"
