@@ -70,6 +70,7 @@ Key device groups currently active:
 | `id6_b.devices.monochromator.MonoDevice` | Kohzu DCM — energy pseudo-positioner | `mono` |
 | `id6_b.devices.energy_device.EnergySignal` | Coordinated beamline energy | `energy` |
 | `id6_b.devices.aps_undulator.PolarUndulatorPair` | Undulator pair (upstream + downstream) | `undulators` |
+| `id6_b.devices.scaler.LocalScalerCH` | Scaler/counter | `scaler` |
 | `id6_b.devices.aps_status.StatusAPS` | APS machine status (read-only) | `status_aps` |
 | `apstools.devices.mb_creator` | CRL (10 lenses) + Mirror1 motor bundles | `crl`, `mirror1` |
 | `hklpy2.creator` | E6C diffractometers (hkl, psi, q2 engines) | `psic_sim`, `psic`, `psic_psi`, `psic_q` |
@@ -84,6 +85,7 @@ Several devices are **commented out** in `devices.yml` pending fixes or future w
 - **`pv_positioner.py`** — `pvpositioner_factory()` dynamically creates `PVPositioner` subclasses from raw PV strings. Used in `devices.yml` for Mirror1 motors where the ophyd motor record pattern doesn't apply.
 - **`monochromator.py`** — `MonoDevice` (PseudoPositioner, prefix `6ida1:`): pseudo axis `energy` (keV, 2.6–32) with real motors `th`→`m8`, `y2`→`m11`, plus additional `thf2`→`m13`, `chi2`→`m15`. Kohzu IOC crystal parameter records (`crystal_2d`, `y_offset`, `crystal_h/k/l/a`, `crystal_type`). `pzt_thf2` is commented out pending PV confirmation.
 - **`energy_device.py`** — `EnergySignal` (ophyd `Signal`): coordinates beamline energy by moving `mono.energy` and any device in `oregistry` labeled `"track_energy"` whose `tracking` flag is enabled. Supports optional `energy_offset` per tracking device. Feedback hooks present but must be adapted to 6-ID-B's feedback system before enabling. `mono` must be created before `energy` in `devices.yml`.
+- **`scaler.py`** — `LocalScalerCH` (prefix `6idb1:scaler1`): extends `ScalerCH` with `preset_monitor` (seconds ↔ clock-count conversion for the time channel), `freq` component, `monitor` setter (selects monitor and adjusts gates), and `select_read/plot_channels()`. `default_settings()` called by `make_devices()` on startup.
 - **`lakeshore_controllers.py`** — `LS340Device` for Lakeshore 340 temperature controller (currently disabled in devices.yml).
 - **`lambda_detector.py`** — `Lambda250kDetector` area detector with HDF5, ROI (1–4), and stats (1–5) plugins (currently disabled in devices.yml).
 
@@ -92,6 +94,17 @@ Several devices are **commented out** in `devices.yml` pending fixes or future w
 - **`iconfig.yml`** — master instrument config: databroker catalog name (`6idb`), metadata defaults, SPEC/NeXus enable flags, BEC settings, DM_SETUP_FILE path
 - **`devices.yml`** — active device definitions (Guarneri YAML)
 - **`devices_aps_only.yml`** — APS machine parameters device, only loaded on APS subnet
+
+### Utilities (`src/id6_b/utils/`)
+
+- **`counters_class.py`** — `CountersClass` + singleton `counters`. Holds the detector list and monitor channel for scan plans. Looks up devices from `oregistry` lazily (safe to import before devices are created). `IDEAL_ORDER` controls detector priority; add new detector names there as hardware is added. Usage:
+
+```python
+from id6_b.utils.counters_class import counters
+counters()                           # interactive channel/monitor selection
+counters.plotselect(dets=[1], mon=0) # non-interactive
+RE(bp.count(counters.detectors))
+```
 
 ### Plans (`src/id6_b/plans/`)
 
@@ -112,6 +125,7 @@ Several devices are **commented out** in `devices.yml` pending fixes or future w
 - `aps_undulator.py` — adapted with 6-ID-B-specific deadband/tracking logic
 - `monochromator.py` — adapted: prefix `6ida1:`, motors m8/m11/m13/m15, no labjack PZTs
 - `energy_device.py` — copied as-is; feedback hooks present but not yet wired to a 6-ID-B feedback device
+- `scaler.py` — adapted for single scaler; `counters_class.py` ported to `utils/` with `IDEAL_ORDER = ["scaler"]`
 
 **Available in `polar_common/devices/` for future porting:**
 
@@ -121,7 +135,7 @@ Several devices are **commented out** in `devices.yml` pending fixes or future w
 | `shutters.py` | PSS shutter (`PolarShutter`) with auto-open on PSS state change |
 | `filters_device.py` | 12-slot APS filter wheel with transmission/energy control |
 | `jj_slits.py` | 4-blade slit system with center/size pseudo-positioners |
-| `scaler.py` | Scaler/counter devices |
+| `scaler_dual_ctr8.py` | Dual CTR8 scaler (16 channels, for dual-scaler setups) |
 | `preamps.py` | SRS 570 pre-amplifier with auto-optimization plans |
 | `srs810.py` | SRS 810 lock-in amplifier (`LockinDevice`) |
 | `quadems.py` | QuadEM / TetrAMM electrometer with sum/diff/position |
