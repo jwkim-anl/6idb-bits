@@ -15,6 +15,7 @@ __all__ = ["counters"]
 # to the instrument (e.g. "lambda250k", "vortex").
 IDEAL_ORDER = [
     "scaler",
+    "lambda250k",
 ]
 
 

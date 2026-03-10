@@ -319,6 +319,29 @@ class Lambda250kDetector(MySingleTrigger, DetectorBase):
         self.xcenter = xc
         self.ycenter = yc
 
+    @property
+    def plot_options(self):
+        """Return stats channel names for use by CountersClass."""
+        return [f"Stats{i}" for i in range(1, 6)]
+
+    def select_plot(self, channels):
+        """Set Kind.hinted on the stats matching *channels*, Kind.normal on others.
+
+        Called by CountersClass.select_plot_channels with the list of channel
+        names chosen by the user from detectors_plot_options.
+
+        Parameters
+        ----------
+        channels : list of str
+            Subset of ``plot_options`` (e.g. ``["Stats1", "Stats3"]``).
+        """
+        for i in range(1, 6):
+            stat = getattr(self, f"stats{i}")
+            if f"Stats{i}" in channels:
+                stat.total.kind = Kind.hinted
+            else:
+                stat.total.kind = Kind.normal
+
 def configure_lambda(lambda250k):
     """Configure the Lambda 250k detector."""
 
