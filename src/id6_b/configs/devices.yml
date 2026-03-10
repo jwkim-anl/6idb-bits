@@ -174,7 +174,7 @@ hklpy2.creator:
 id6_b.devices.lambda_detector.Lambda250kDetector:
 - name: lambda250k
   prefix: "s6lambda1:"
-  labels: ["detector", "detectors", "baseline"]
+  labels: ["detector", "detectors"]
 #   labels: ["area_detector", "detectors"]
 
 # apstools.devices.ad_creator:
