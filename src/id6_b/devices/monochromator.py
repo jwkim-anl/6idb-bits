@@ -1,7 +1,7 @@
 """Monochromator with energy controller."""
 
 from numpy import arcsin, cos, pi, sin
-from ophyd import Component, EpicsMotor, EpicsSignal, PseudoPositioner, PseudoSingle
+from ophyd import Component, EpicsMotor, EpicsSignal, PseudoPositioner, PseudoSingle, Signal
 from ophyd.pseudopos import pseudo_position_argument, real_position_argument
 from scipy.constants import Planck, speed_of_light
 
@@ -10,6 +10,12 @@ class MonoDevice(PseudoPositioner):
     """6-ID-B Kohzu double-crystal monochromator.
 
     Instantiate with prefix ``"6ida1:"``.
+
+    ``y_offset`` and ``y_sign`` are soft signals that can be adjusted at
+    runtime without reconnecting::
+
+        mono.y_offset.put(25)   # crystal offset in mm
+        mono.y_sign.put(-1)     # flip y2 direction: +1 or -1
     """
 
     # Pseudo axis
@@ -28,8 +34,11 @@ class MonoDevice(PseudoPositioner):
     # PZT thf2 fine-tuner readback — uncomment and set full PV when known:
     # pzt_thf2 = FormattedComponent(EpicsSignalRO, "6ida1:???")
 
+    # Soft configuration signals
+    y_offset = Component(Signal, value=25, kind="config")   # crystal offset, mm
+    y_sign = Component(Signal, value=-1, kind="config")     # +1 or -1
+
     # Crystal parameters (Kohzu IOC records, relative to prefix)
-    y_offset = Component(EpicsSignal, "Kohzu_yOffsetAO.VAL", kind="config")
     crystal_h = Component(EpicsSignal, "BraggHAO.VAL", kind="config")
     crystal_k = Component(EpicsSignal, "BraggKAO.VAL", kind="config")
     crystal_l = Component(EpicsSignal, "BraggLAO.VAL", kind="config")
@@ -45,7 +54,7 @@ class MonoDevice(PseudoPositioner):
     def convert_energy_to_y(self, energy):
         """Convert energy (keV) to y2 position."""
         theta = self.convert_energy_to_theta(energy)
-        return self.y_offset.get() / (2 * cos(theta * pi / 180))
+        return self.y_sign.get() * self.y_offset.get() / (2 * cos(theta * pi / 180))
 
     def convert_theta_to_energy(self, theta):
         """Convert Bragg angle (degrees) to energy (keV)."""
