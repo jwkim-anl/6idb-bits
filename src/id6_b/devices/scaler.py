@@ -107,11 +107,14 @@ class LocalScalerCH(ScalerCH):
         for channel_attr in self.channels.component_names:
             channel = getattr(self.channels, channel_attr)
             epics_name = channel.s.name  # empty string for unnamed channels
-            if epics_name and epics_name in chan_names:
+            if not epics_name:
+                # Unnamed channel: omit completely to prevent empty-string
+                # keys in data_keys, which fail event model schema validation.
+                channel.s.kind = Kind.omitted
+            elif epics_name in chan_names:
                 channel.s.kind = Kind.hinted
             else:
-                if channel.kind.value != 0:
-                    channel.s.kind = Kind.normal
+                channel.s.kind = Kind.normal
 
     def select_read_channels(self, chan_names=None):
         """Select channels to read, always including chan01 (time).
