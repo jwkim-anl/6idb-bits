@@ -87,7 +87,7 @@ Several devices are **commented out** in `devices.yml` pending fixes or future w
 - **`energy_device.py`** — `EnergySignal` (ophyd `Signal`): coordinates beamline energy by moving `mono.energy` and any device in `oregistry` labeled `"track_energy"` whose `tracking` flag is enabled. Supports optional `energy_offset` per tracking device. Feedback hooks present but must be adapted to 6-ID-B's feedback system before enabling. `mono` must be created before `energy` in `devices.yml`.
 - **`scaler.py`** — `LocalScalerCH` (prefix `6idb1:scaler1`): extends `ScalerCH` with `preset_monitor` (seconds ↔ clock-count conversion for the time channel), `freq` component, `monitor` setter (selects monitor and adjusts gates), and `select_read/plot_channels()`. `default_settings()` called by `make_devices()` on startup.
 - **`lakeshore_controllers.py`** — `LS340Device` for Lakeshore 340 temperature controller (currently disabled in devices.yml).
-- **`lambda_detector.py`** — `Lambda250kDetector` area detector with HDF5, ROI (1–4), and stats (1–5) plugins (currently disabled in devices.yml).
+- **`lambda_detector.py`** — `Lambda250kDetector` area detector with HDF5, ROI (1–4), and stats (1–5) plugins (currently disabled in devices.yml). Implements the `CountersClass` interface: `plot_options` returns `["Stats1"…"Stats5"]`; `select_plot(channels)` sets `Kind.hinted` on selected stats. Enable by uncommenting in `devices.yml` — it will then appear automatically in `counters()`. Call `configure_lambda(lambda250k)` after enabling to wire up ROI/stats ports and set default kinds.
 
 ### Key configuration files (`src/id6_b/configs/`)
 
@@ -97,7 +97,7 @@ Several devices are **commented out** in `devices.yml` pending fixes or future w
 
 ### Utilities (`src/id6_b/utils/`)
 
-- **`counters_class.py`** — `CountersClass` + singleton `counters`. Holds the detector list and monitor channel for scan plans. Looks up devices from `oregistry` lazily (safe to import before devices are created). `IDEAL_ORDER` controls detector priority; add new detector names there as hardware is added. Usage:
+- **`counters_class.py`** — `CountersClass` + singleton `counters`. Holds the detector list and monitor channel for scan plans. Looks up devices from `oregistry` lazily (safe to import before devices are created). `IDEAL_ORDER = ["scaler", "lambda250k"]` controls detector priority; add new detector names there as hardware is added. For a detector to appear in `counters()` it must implement `plot_options` (list of channel name strings) and `select_plot(channels)` (sets `Kind.hinted`). Usage:
 
 ```python
 from id6_b.utils.counters_class import counters
