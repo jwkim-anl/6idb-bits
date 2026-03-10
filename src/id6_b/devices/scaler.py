@@ -92,22 +92,22 @@ class LocalScalerCH(ScalerCH):
         return name_map
 
     def select_plot_channels(self, chan_names=None):
-        """Set Kind.hinted on the given channel names, Kind.normal on all others."""
+        """Set Kind.hinted on the given channel names, Kind.normal on all others.
+
+        Iterates *all* channels (not just named ones) so that unnamed channels
+        are explicitly demoted from their default Kind.hinted, preventing empty
+        strings from appearing in hints["fields"].
+        """
         self.match_names()
         name_map = self.channels_name_map
 
         if not chan_names:
             chan_names = name_map.keys()
 
-        for ch in name_map.keys():
-            try:
-                channel = getattr(self.channels, name_map[ch])
-            except KeyError:
-                raise RuntimeError(
-                    f"The channel {ch} is not configured on the scaler. "
-                    f"The named channels are {tuple(name_map)}"
-                )
-            if ch in chan_names:
+        for channel_attr in self.channels.component_names:
+            channel = getattr(self.channels, channel_attr)
+            epics_name = channel.s.name  # empty string for unnamed channels
+            if epics_name and epics_name in chan_names:
                 channel.s.kind = Kind.hinted
             else:
                 if channel.kind.value != 0:

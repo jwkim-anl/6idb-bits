@@ -118,3 +118,5 @@ if host_on_aps_subnet():
 # Setup baseline stream with connect=False is default
 # Devices with the label 'baseline' will be added to the baseline stream.
 setup_baseline_stream(sd, oregistry, connect=False)
+
+from id6_b.utils.counters_class import counters  # noqa: F401, E402
