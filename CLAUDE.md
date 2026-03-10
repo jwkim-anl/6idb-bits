@@ -55,10 +55,12 @@ queue-monitor &                           # GUI client
 
 1. Load `configs/iconfig.yml` and configure logging
 2. Initialize Bluesky core: BEC/peaks → databroker catalog → RunEngine + supplemental data
-3. Conditionally subscribe callbacks (NeXus writer, SPEC writer) based on `iconfig.yml` flags
-4. `RE(make_devices(file="devices.yml"))` — creates all devices via Guarneri YAML
-5. `RE(make_devices(file="devices_aps_only.yml"))` — only when on APS subnet
-6. `setup_baseline_stream(sd, oregistry)` — adds devices labeled `"baseline"` to the supplemental data stream
+3. Populate `id6_b.utils.run_engine` module with the live `RE` and `bec` references
+4. Conditionally subscribe callbacks (NeXus writer, SPEC writer) based on `iconfig.yml` flags
+5. `RE(make_devices(file="devices.yml"))` — creates all devices via Guarneri YAML
+6. `RE(make_devices(file="devices_aps_only.yml"))` — only when on APS subnet
+7. `setup_baseline_stream(sd, oregistry)` — adds devices labeled `"baseline"` to the supplemental data stream
+8. Import `counters` singleton and `local_scans` plans into the session namespace
 
 ### Device configuration (`src/id6_b/configs/devices.yml`)
 
@@ -88,15 +90,17 @@ Several devices are **commented out** in `devices.yml` pending fixes or future w
 - **`energy_device.py`** — `EnergySignal` (ophyd `Signal`): coordinates beamline energy by moving `mono.energy` and any device in `oregistry` labeled `"track_energy"` whose `tracking` flag is enabled. Supports optional `energy_offset` per tracking device. Feedback hooks present but must be adapted to 6-ID-B's feedback system before enabling. `mono` must be created before `energy` in `devices.yml`.
 - **`scaler.py`** — `LocalScalerCH` (prefix `6idb1:scaler1`): extends `ScalerCH` with `preset_monitor` (seconds ↔ clock-count conversion for the time channel), `freq` component, `monitor` setter (selects monitor and adjusts gates), and `select_read/plot_channels()`. `default_settings()` called by `make_devices()` on startup.
 - **`lakeshore_controllers.py`** — `LS340Device` for Lakeshore 340 temperature controller (currently disabled in devices.yml).
-- **`lambda_detector.py`** — `Lambda250kDetector` area detector with HDF5, ROI (1–4), and stats (1–5) plugins (currently disabled in devices.yml). Implements the `CountersClass` interface: `plot_options` returns `["Stats1"…"Stats5"]`; `select_plot(channels)` sets `Kind.hinted` on selected stats. Enable by uncommenting in `devices.yml` — it will then appear automatically in `counters()`. Call `configure_lambda(lambda250k)` after enabling to wire up ROI/stats ports and set default kinds.
+- **`lambda_detector.py`** — `Lambda250kDetector` area detector with HDF5, ROI (1–4), and stats (1–5) plugins. **Enabled** in `devices.yml` with labels `["detector", "detectors", "baseline"]`. Implements the `CountersClass` interface: `plot_options` returns `["Stats1"…"Stats5"]`; `select_plot(channels)` sets `Kind.hinted` on selected stats. Call `configure_lambda(lambda250k)` after enabling to wire up ROI/stats ports and set default kinds. Has a `setup_images()` method used by `local_scans` to configure per-scan HDF5 file paths; a `save_image_flag` attribute controls whether images are saved.
 
 ### Key configuration files (`src/id6_b/configs/`)
 
-- **`iconfig.yml`** — master instrument config: databroker catalog name (`6idb`), metadata defaults, SPEC/NeXus enable flags, BEC settings, DM_SETUP_FILE path
+- **`iconfig.yml`** — master instrument config: databroker catalog name (`6idb`), metadata defaults, SPEC/NeXus enable flags, BEC settings, DM_SETUP_FILE path. Contains `AREA_DETECTOR: HDF5_FILE_TEMPLATE: "%s/%s_%05d"` used by `local_scans` to build per-scan output file paths.
 - **`devices.yml`** — active device definitions (Guarneri YAML)
 - **`devices_aps_only.yml`** — APS machine parameters device, only loaded on APS subnet
 
 ### Utilities (`src/id6_b/utils/`)
+
+- **`run_engine.py`** — Module-level `RE = None` and `bec = None` placeholders. `startup.py` populates these after `init_RE()`. Plans import the module (not the names) so they see the live values at call time: `from ..utils import run_engine as _re_module; _re_module.RE.md[...]`.
 
 - **`counters_class.py`** — `CountersClass` + singleton `counters`. Holds the detector list and monitor channel for scan plans. Looks up devices from `oregistry` lazily (safe to import before devices are created). `IDEAL_ORDER = ["scaler", "lambda250k"]` controls detector priority; add new detector names there as hardware is added. For a detector to appear in `counters()` it must implement `plot_options` (list of channel name strings) and `select_plot(channels)` (sets `Kind.hinted`). Usage:
 
@@ -107,26 +111,61 @@ counters.plotselect(dets=[1], mon=0) # non-interactive
 RE(bp.count(counters.detectors))
 ```
 
+- **`experiment_utils.py`** — `ExperimentClass` + singleton `experiment`. Manages experiment paths: `base_experiment_path`, `sample`, `file_base_name`. `experiment_path` property returns `base_experiment_path / sample`. Call `experiment_setup()` once per session before running local scans. Also exports `experiment_change_sample()`. No DM/ESAF/proposal dependencies.
+
+```python
+from id6_b.utils.experiment_utils import experiment_setup
+experiment_setup("/data/2024-1/user_name", sample="MyFilm", base_name="scan")
+# or interactively:
+experiment_setup()
+```
+
 ### Plans (`src/id6_b/plans/`)
 
 - **`sim_plans.py`** — simulation-only plans for testing (`sim_count_plan`, `sim_rel_scan_plan`, `sim_print_plan`)
 - **`dm_plans.py`** — APS Data Management workflow integration (`dm_submit_workflow_job`, `dm_list_processing_jobs`)
+- **`local_preprocessors.py`** — Plan decorators used by `local_scans`:
+  - `configure_counts_decorator(detectors, time)` — sets `preset_monitor` on all detectors; restores originals on exit
+  - `extra_devices_decorator(extras)` — temporarily demotes extra devices from `Kind.hinted` to `Kind.normal` so they don't appear in BEC plots
+- **`local_scans.py`** — Main user-facing scan plans. All plans configure the NeXus writer, collect extra devices (undulator energies when scanning energy, diffractometer when scanning HKL), and write rich run-start metadata. Available plans: `count`, `ascan`, `lup`, `grid_scan`, `rel_grid_scan`, `mv`, `mvr`, `abs_set`. All support `fixq=True` to hold HKL position constant (useful for energy scans). No dichro, lock-in, phase plate, or qxscan support.
+
+```python
+# One-time setup per session:
+experiment_setup("/nsls2/data/6idb/2024-1/user", sample="Fe3O4", base_name="scan")
+
+# Scans:
+RE(count(5, 1.0))                              # 5 points, 1 s each
+RE(ascan(energy, 7.1, 7.15, 51, 1.0))         # absolute energy scan
+RE(lup(sample_x, -0.5, 0.5, 51, 1.0))         # relative scan (returns to start)
+RE(grid_scan(sample_y, -1, 1, 11, sample_x, -1, 1, 11, 1.0))
+RE(ascan(energy, 7.1, 7.15, 51, 1.0, fixq=True))  # hold HKL during energy scan
+```
 
 ### Callbacks (`src/id6_b/callbacks/`)
 
 - **`spec_data_file_writer.py`** — SPEC-format data file output (enabled in `iconfig.yml`)
-- **`nexus_data_file_writer.py`** — NeXus/HDF5 data file output (disabled by default)
+- **`nexus_data_file_writer.py`** — NeXus/HDF5 data file output. Contains `MyNXWriter(NXWriterAPS)` with:
+  - `external_files = {}` dict for area-detector HDF5 ExternalLinks (`{det_name: rel_path}`)
+  - `write_entry()` — writes `layout_version`, creates `h5py.ExternalLink` entries for each detector, resets `external_files`
+  - `write_streams()` — skips external image data (linked separately), writes EPOCH + relative `time` datasets
+  - Module-level singleton `nxwriter = MyNXWriter()` configured from `iconfig`. **Not** subscribed globally — `local_scans` subscribes it per-scan via `@subs_decorator(nxwriter.receiver)`. `local_scans` also calls `nxwriter.wait_writer_plan_stub()` at the end of each scan.
 
 ## polar_example Reference Library
 
 `src/polar_example/polar_common/` is the shared device library from the APS POLAR group (4-ID beamlines). It is **not installed as a package** — it lives in the repo as a reference/copy source. When the user asks to port a device to `id6_b`, copy the relevant file from `src/polar_example/polar_common/devices/` and adapt it.
 
-**Already ported to `id6_b/devices/`:**
-- `aps_status.py` — matches the polar_common version
-- `aps_undulator.py` — adapted with 6-ID-B-specific deadband/tracking logic
-- `monochromator.py` — adapted: prefix `6ida1:`, motors m8/m11/m13/m15, no labjack PZTs
-- `energy_device.py` — copied as-is; feedback hooks present but not yet wired to a 6-ID-B feedback device
-- `scaler.py` — adapted for single scaler; `counters_class.py` ported to `utils/` with `IDEAL_ORDER = ["scaler"]`
+**Already ported to `id6_b/`:**
+- `devices/aps_status.py` — matches the polar_common version
+- `devices/aps_undulator.py` — adapted with 6-ID-B-specific deadband/tracking logic
+- `devices/monochromator.py` — adapted: prefix `6ida1:`, motors m8/m11/m13/m15, `y_offset` and `y_sign` as soft `Signal` components, no labjack PZTs
+- `devices/energy_device.py` — copied as-is; feedback hooks present but not yet wired to a 6-ID-B feedback device
+- `devices/scaler.py` — adapted for single scaler
+- `utils/counters_class.py` — ported with `IDEAL_ORDER = ["scaler", "lambda250k"]`
+- `utils/experiment_utils.py` — simplified (no DM/ESAF/proposal/server); just path + sample + base_name management
+- `utils/run_engine.py` — new module for RE/bec references (populated by `startup.py`)
+- `callbacks/nexus_data_file_writer.py` — adapted: `MyNXWriter(NXWriterAPS)`, per-scan subscription, ExternalLink support
+- `plans/local_preprocessors.py` — adapted: no dichro/lockin decorators
+- `plans/local_scans.py` — adapted: no dichro/lockin/phase plates/vortex_sgz/qxscan; keeps `fixq`
 
 **Available in `polar_common/devices/` for future porting:**
 

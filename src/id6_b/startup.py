@@ -75,13 +75,14 @@ RE, sd = init_RE(iconfig, bec_instance=bec, cat_instance=cat)
 RE.md["versions"]["hklpy2"] = hklpy2.__version__
 RE.md["versions"]["hkl_soleil"] = libhkl.VERSION
 
+# Populate run_engine module so plans can access RE without circular imports.
+import id6_b.utils.run_engine as _re_module  # noqa: E402
 
-# Optional Nexus callback block
-# delete this block if not using Nexus
-if iconfig.get("NEXUS_DATA_FILES", {}).get("ENABLE", False):
-    from .callbacks.nexus_data_file_writer import nxwriter_init
+_re_module.RE = RE
+_re_module.bec = bec
 
-    nxwriter = nxwriter_init(RE)
+# NeXus writer — imported for use by local_scans (subscribed per-scan, not globally).
+from .callbacks.nexus_data_file_writer import nxwriter  # noqa: F401, E402
 
 # Optional SPEC callback block
 # delete this block if not using SPEC
@@ -120,3 +121,18 @@ if host_on_aps_subnet():
 setup_baseline_stream(sd, oregistry, connect=False)
 
 from id6_b.utils.counters_class import counters  # noqa: F401, E402
+from id6_b.plans.local_scans import (  # noqa: F401, E402
+    abs_set,
+    ascan,
+    count,
+    grid_scan,
+    lup,
+    mv,
+    mvr,
+    rel_grid_scan,
+)
+from id6_b.utils.experiment_utils import (  # noqa: F401, E402
+    experiment,
+    experiment_change_sample,
+    experiment_setup,
+)

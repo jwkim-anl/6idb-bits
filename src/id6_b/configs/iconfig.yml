@@ -74,3 +74,9 @@ OPHYD:
         PV_CONNECTION: *TIMEOUT
 
 XMODE_DEBUG_LEVEL: Plain
+
+### Area detector output file path template.
+### Used by local_scans to build per-scan NeXus master and detector HDF5 paths.
+### Arguments: base_path, file_base_name, scan_id
+AREA_DETECTOR:
+    HDF5_FILE_TEMPLATE: "%s/%s_%05d"
