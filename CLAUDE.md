@@ -90,13 +90,13 @@ Several devices are **commented out** in `devices.yml` pending fixes or future w
 - **`energy_device.py`** — `EnergySignal` (ophyd `Signal`): coordinates beamline energy by moving `mono.energy` and any device in `oregistry` labeled `"track_energy"` whose `tracking` flag is enabled. Supports optional `energy_offset` per tracking device. Feedback hooks present but must be adapted to 6-ID-B's feedback system before enabling. `mono` must be created before `energy` in `devices.yml`.
 - **`scaler.py`** — `LocalScalerCH` (prefix `6idb1:scaler1`): extends `ScalerCH` with `preset_monitor` (seconds ↔ clock-count conversion for the time channel), `freq` component, `monitor` setter (selects monitor and adjusts gates), and `select_read/plot_channels()`. `default_settings()` called by `make_devices()` on startup. `select_plot_channels()` iterates all channels: unnamed ones get `Kind.omitted` (prevents empty-string keys in `data_keys`), named non-selected get `Kind.normal`, selected get `Kind.hinted`.
 - **`lakeshore_controllers.py`** — `LS340Device` for Lakeshore 340 temperature controller (currently disabled in devices.yml).
-- **`lambda_detector.py`** — `Lambda250kDetector` area detector with HDF5, ROI (1–4), and stats (1–5) plugins. **Enabled** in `devices.yml` with labels `["detector", "detectors", "baseline"]`. Implements the `CountersClass` interface: `plot_options` returns `["Stats1"…"Stats5"]`; `select_plot(channels)` sets `Kind.hinted` on selected stats. Call `configure_lambda(lambda250k)` after enabling to wire up ROI/stats ports and set default kinds. Has a `setup_images()` method used by `local_scans` to configure per-scan HDF5 file paths; a `save_image_flag` attribute controls whether images are saved.
+- **`lambda_detector.py`** — `Lambda250kDetector` area detector with HDF5, ROI (1–4), and stats (1–5) plugins. **Enabled** in `devices.yml` with labels `["detector", "detectors"]` (no `"baseline"` — area detectors require `stage()` before reading and must not be in the baseline stream). Implements the `CountersClass` interface: `plot_options` returns `["Stats1"…"Stats5"]`; `select_plot(channels)` sets `Kind.hinted` on selected stats. Call `configure_lambda(lambda250k)` after enabling to wire up ROI/stats ports and set default kinds. Has a `setup_images()` method used by `local_scans` to configure per-scan HDF5 file paths; a `save_image_flag` attribute controls whether images are saved.
 
 ### Key configuration files (`src/id6_b/configs/`)
 
 - **`iconfig.yml`** — master instrument config: databroker catalog name (`6idb`), metadata defaults, SPEC/NeXus enable flags, BEC settings, DM_SETUP_FILE path. Contains `AREA_DETECTOR: HDF5_FILE_TEMPLATE: "%s/%s_%05d"` used by `local_scans` to build per-scan output file paths.
 - **`devices.yml`** — active device definitions (Guarneri YAML)
-- **`devices_aps_only.yml`** — APS machine parameters device, only loaded on APS subnet
+- **`devices_aps_only.yml`** — `ApsMachineParametersDevice` (name `aps`), only loaded on APS subnet. Label is `"aps_machine"` (not `"baseline"`) because `ApsCycleComputedRO.get()` raises `UnboundLocalError` when APS cycle data is unavailable — a known apstools bug. Restore `"baseline"` once fixed upstream.
 
 ### Utilities (`src/id6_b/utils/`)
 
@@ -152,7 +152,7 @@ RE(ascan(energy, 7.1, 7.15, 51, 1.0, fixq=True))  # hold HKL during energy scan
 
 ## polar_example Reference Library
 
-`src/polar_example/polar_common/` is the shared device library from the APS POLAR group (4-ID beamlines). It is **not installed as a package** — it lives in the repo as a reference/copy source. When the user asks to port a device to `id6_b`, copy the relevant file from `src/polar_example/polar_common/devices/` and adapt it.
+`src/polar_example/polar_common/` is the shared device library from the APS POLAR group (4-ID beamlines). It is **not installed as a package** and is **not tracked by git** (untracked, lives only in the working tree as a local reference). When the user asks to port a device to `id6_b`, copy the relevant file from `src/polar_example/polar_common/devices/` and adapt it.
 
 **Already ported to `id6_b/`:**
 - `devices/aps_status.py` — matches the polar_common version
