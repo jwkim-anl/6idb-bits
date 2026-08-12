@@ -5,4 +5,6 @@
 apstools.devices.ApsMachineParametersDevice:
 - name: aps
   labels:
-  - baseline
+  - aps_machine
+  # "baseline" removed: ApsCycleComputedRO.get() raises UnboundLocalError when
+  # APS cycle data is unavailable (apstools bug). Restore when apstools is fixed.
