@@ -188,6 +188,19 @@ class LocalScalerCH(ScalerCH):
         """Return all EPICS-named scaler channel labels."""
         return list(self.channels_name_map.keys())
 
+    @property
+    def plot_signals(self):
+        """Return a mapping of channel label → the signal carrying its counts.
+
+        Companion to :attr:`plot_options`: the names are the same, but this
+        resolves each one to the underlying signal so callers can inspect or
+        change its ``kind``.  Used by the GUI's Detectors tab.
+        """
+        return {
+            name: getattr(self.channels, component).s
+            for name, component in self.channels_name_map.items()
+        }
+
     def select_plot(self, channels):
         self.select_plot_channels(chan_names=channels)
 
