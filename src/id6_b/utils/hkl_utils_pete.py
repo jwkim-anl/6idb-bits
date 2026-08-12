@@ -26,6 +26,7 @@ Auxilary HKL functions.
     ~_wh
     ~setlat
     ~setaz
+    ~freeze
     ~freeze_psi
     ~wh
 """
@@ -63,6 +64,7 @@ __all__ = """
     _wh
     setlat
     setaz
+    freeze
     freeze_psi
 """.split()
 
@@ -787,6 +789,63 @@ def setmode(mode=None):
             current_index + 1
         )
         _geom_.core.mode = _geom_.core.modes[int(mode) - 1]
+
+    # Freeze the appropriate detector angle at 0 based on mode geometry.
+    # Local axis names are derived from the solver→local axis name mapping
+    # (E6C solver: 'gamma' = horizontal detector, 'delta' = vertical detector).
+    selected_mode = _geom_.core.mode
+    if "vertical" in selected_mode:
+        solver_det = "gamma"   # horizontal detector angle frozen at 0
+    elif "horizontal" in selected_mode:
+        solver_det = "delta"   # vertical detector angle frozen at 0
+    else:
+        solver_det = None
+
+    if solver_det is not None:
+        solver_reals = _geom_.core.solver_real_axis_names
+        local_reals = list(_geom_.real_positioners._fields)
+        solver_to_local = dict(zip(solver_reals, local_reals))
+        det_angle = solver_to_local.get(solver_det)
+        if det_angle is not None:
+            _geom_.core.presets = {det_angle: 0}
+            print(f"Preset {det_angle}=0 for mode '{selected_mode}'")
+        else:
+            _geom_.core.presets = {}
+    else:
+        _geom_.core.presets = {}
+
+def freeze():
+    """
+    Interactively set preset values for the constant axes of the current mode.
+
+    For each angle held constant in the current mode, prompts for a value
+    (showing the current preset as default). Updates ``_geom_.core.presets``.
+    """
+    _geom_ = get_diffractometer()
+    current_mode = _geom_.core.mode
+    constant_axes = _geom_.core.constant_axis_names
+
+    if not constant_axes:
+        print(f"Mode '{current_mode}' has no constant (frozen) axes.")
+        return
+
+    print(f"Mode: {current_mode}")
+    current_presets = _geom_.core.presets
+    new_presets = {}
+    for axis in constant_axes:
+        current_val = current_presets.get(axis, 0.0)
+        raw = input(f"  {axis} ({current_val})? ") or current_val
+        try:
+            new_presets[axis] = float(raw)
+        except ValueError:
+            print(f"  Invalid value for '{axis}', keeping {current_val}")
+            new_presets[axis] = float(current_val)
+
+    _geom_.core.presets = new_presets
+    print("Frozen angles:")
+    for axis, val in new_presets.items():
+        print(f"  {axis} = {val}")
+
 
 def ca(h, k, l):
     """

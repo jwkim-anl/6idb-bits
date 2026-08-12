@@ -78,11 +78,170 @@ apstools.devices.mb_creator:
         stop_pv: "6idaSoft:allstop"
         stop_value: 1
 
+# --- Slits -------------------------------------------------------------
+# sl1/sl2/sl3 are JJ-style 4-blade slits.  The four blade motors are plain
+# motor records; the vertical/horizontal center and size are soft records
+# computed by the IOC (transform record "Slit_N"), so those axes use the
+# per-axis "class:" hook with PVPositionerSoftDoneWithStop.  The axis prefix
+# is a suffix onto the bundle prefix, e.g. "6idb1:" + "Slit_1" + "Vt2.D".
+- name: sl1
+  prefix: "6idb1:"
+  labels: ["slits", "baseline"]
+  motors:
+    top: "m42"
+    bot: "m41"
+    out: "m43"
+    inb: "m44"
+    vcen: &slit1_vcen
+      class: "apstools.devices.PVPositionerSoftDoneWithStop"
+      prefix: "Slit_1"
+      readback_pv: "Vt2.D"
+      setpoint_pv: "Vcenter.VAL"
+      tolerance: 0.003
+    vsize:
+      <<: *slit1_vcen
+      readback_pv: "Vt2.C"
+      setpoint_pv: "Vsize.VAL"
+      tolerance: 0.009
+    hcen:
+      <<: *slit1_vcen
+      readback_pv: "Ht2.D"
+      setpoint_pv: "Hcenter.VAL"
+      tolerance: 0.003
+    hsize:
+      <<: *slit1_vcen
+      readback_pv: "Ht2.C"
+      setpoint_pv: "Hsize.VAL"
+      tolerance: 0.003
+- name: sl2
+  prefix: "6idb1:"
+  labels: ["slits", "baseline"]
+  motors:
+    top: "m45"
+    bot: "m46"
+    out: "m47"
+    inb: "m48"
+    vcen: &slit2_vcen
+      class: "apstools.devices.PVPositionerSoftDoneWithStop"
+      prefix: "Slit_2"
+      readback_pv: "Vt2.D"
+      setpoint_pv: "Vcenter.VAL"
+      tolerance: 0.003
+    vsize:
+      <<: *slit2_vcen
+      readback_pv: "Vt2.C"
+      setpoint_pv: "Vsize.VAL"
+      tolerance: 0.003
+    hcen:
+      <<: *slit2_vcen
+      readback_pv: "Ht2.D"
+      setpoint_pv: "Hcenter.VAL"
+      tolerance: 0.003
+    hsize:
+      <<: *slit2_vcen
+      readback_pv: "Ht2.C"
+      setpoint_pv: "Hsize.VAL"
+      tolerance: 0.003
+- name: sl3
+  prefix: "6idb1:"
+  labels: ["slits", "baseline"]
+  motors:
+    top: "m1"
+    bot: "m2"
+    out: "m4"
+    inb: "m3"
+    vcen: &slit3_vcen
+      class: "apstools.devices.PVPositionerSoftDoneWithStop"
+      prefix: "Slit_3"
+      readback_pv: "Vt2.D"
+      setpoint_pv: "Vcenter.VAL"
+      tolerance: 0.003
+    vsize:
+      <<: *slit3_vcen
+      readback_pv: "Vt2.C"
+      setpoint_pv: "Vsize.VAL"
+      tolerance: 0.003
+    hcen:
+      <<: *slit3_vcen
+      readback_pv: "Ht2.D"
+      setpoint_pv: "Hcenter.VAL"
+      tolerance: 0.003
+    hsize:
+      <<: *slit3_vcen
+      readback_pv: "Ht2.C"
+      setpoint_pv: "Hsize.VAL"
+      tolerance: 0.003
+# sl4 drives center/gap directly from motor records -- no transform record.
+- name: sl4
+  prefix: "6idb1:"
+  labels: ["slits", "baseline"]
+  motors:
+    hcen: "m5"    # SL4_HCEN
+    hsize: "m6"   # SL4_HGap
+    vcen: "m7"    # SL4_VCEN
+    vsize: "m8"   # SL4_VGap
+
+# --- Sample environment / table motor bundles ---------------------------
+- name: opty2
+  prefix: "6idb1:"
+  labels: ["motor_device", "baseline"]
+  motors:
+    hu: "m14"   # upstream horizontal   (IOC .DESC "M2U")
+    hd: "m15"   # downstream horizontal (IOC .DESC "M3U")
+    v1: "m11"   # upstream inboard vertical  (IOC .DESC "M1V")
+    v2: "m12"   # upstream outboard vertical (IOC .DESC "M2V")
+    v3: "m13"   # downstream vertical        (IOC .DESC "M3V")
+- name: cryo
+  prefix: "6idb1:"
+  labels: ["motor_device", "baseline"]
+  motors:
+    x: "m34"   # Cryo Stage X
+    y: "m33"   # Cryo Stage Y
+    z: "m35"   # Cryo Stage Z
+- name: diff
+  prefix: "6idb1:"
+  labels: ["motor_device", "baseline"]
+  motors:
+    x: "m30"    # Diff_Tab_X
+    y1: "m25"   # Diff_Tab_Y1
+    y2: "m26"   # Diff_Tab_Y2
+# Polarization analyzer.  Axis names follow the IOC .DESC fields, which
+# disagree with the old bluesky/instrument/devices/pol_analyzer.py mapping
+# (it called m22 "tth" and m23 "chi").  Confirm against the hardware before
+# relying on these names.
+- name: analy
+  prefix: "6idb1:"
+  labels: ["motor_device", "baseline"]
+  motors:
+    tha: "m21"    # .DESC "tha"
+    thp: "m22"    # .DESC "thp"
+    ttha: "m23"   # .DESC "ttha"
+
 
 id6_b.devices.scaler.LocalScalerCH:
 - name: scaler
   prefix: "6idb1:scaler1"
   labels: ["scaler", "detectors", "baseline"]
+# Second scaler record in the same IOC.  It is live and counts independently
+# of scaler1, but DISABLED because its .NM1-.NM8 channel names are currently
+# identical to scaler1's.  ScalerCH renames each channel signal to its EPICS
+# .NM value, so both devices emit the same 8 data keys ("Seconds",
+# "Ion_Chamber_1", ...); reading them in one scan collides in the event
+# document.  To enable: give scaler2 distinct .NM* names in the IOC, then
+# uncomment below and add "scaler2" to IDEAL_ORDER in utils/counters_class.py.
+# - name: scaler2
+#   prefix: "6idb1:scaler2"
+#   labels: ["scaler", "detectors", "baseline"]
+
+id6_b.devices.filters.FilterBank:
+- name: filters
+  prefix: "6idb1:filter:"
+  labels: ["filters", "baseline"]
+
+id6_b.devices.keithley.Keithley2400:
+- name: keithley2400
+  prefix: "6idb1:K24K:"
+  labels: ["keithley"]
 
 apsbits.utils.sim_creator.predefined_device:
 - { creator: ophyd.sim.motor, name: sim_motor }
@@ -101,6 +260,11 @@ hklpy2.creator:
   geometry: E6C
   labels: [ "diffractometer", "hklpy2" ]
   prefix: "6idb1:"  
+  beam_kwargs:
+    class: hklpy2.incident.EpicsMonochromatorRO
+    prefix: "6ida1:"
+    pv_energy: "BraggERdbkAO"
+    pv_wavelength: "BraggLambdaRdbkAO"
   reals:
     # MUST provide in canonical order
     # No defined motor assignments, pick different than fourc (m29-32)
@@ -115,6 +279,11 @@ hklpy2.creator:
   solver_kwargs: {"engine": "psi"}
   labels: [ "diffractometer", "hklpy2" ]
   prefix: "6idb1:"  
+  beam_kwargs:
+    class: hklpy2.incident.EpicsMonochromatorRO
+    prefix: "6ida1:"
+    pv_energy: "BraggERdbkAO"
+    pv_wavelength: "BraggLambdaRdbkAO"
   reals:
     mu: m28
     eta: m17
@@ -127,6 +296,11 @@ hklpy2.creator:
   solver_kwargs: {"engine": "q2"}
   labels: [ "diffractometer", "hklpy2" ]
   prefix: "6idb1:"  
+  beam_kwargs:
+    class: hklpy2.incident.EpicsMonochromatorRO
+    prefix: "6ida1:"
+    pv_energy: "BraggERdbkAO"
+    pv_wavelength: "BraggLambdaRdbkAO"
   reals:
     mu: m28
     eta: m17
@@ -134,6 +308,37 @@ hklpy2.creator:
     phi: m20
     nu: m29
     delta: m18
+
+# --- Ported from bluesky/instrument/devices but IOC not reachable ------
+# Each of these was probed with caget and did not connect.  Uncomment (and
+# for pilatus/vortex, add the device module) once the IOC is running.
+#
+# Double-bounce mirror motors -- IOC "6idACS1:" not found.  Note the old
+# mirror.py is also broken as written (class Mirr, defined as Diff).
+# apstools.devices.mb_creator:
+# - name: mirr
+#   prefix: "6idACS1:"
+#   labels: ["motor_device", "baseline"]
+#   motors:
+#     m1x1: "m1"
+#     m1y1: "m2"
+#     m1x2: "m3"
+#     m1y2: "m4"
+#     m2x1: "m5"
+#     m2y1: "m6"
+#     m2x2: "m7"
+#     m2y2: "m8"
+#
+# Razorbill RP100 strain cell power supply -- neither "iocRazorbill:D1:" nor
+# "6idRazorbill:D1:" resolves.  Needs a device module ported from
+# bluesky/instrument/devices/rp100powersupply.py.
+#
+# Pilatus 100k -- neither "dp_pilatusASD:" nor "s6_pilatus:" resolves.  Needs
+# a device module ported from bluesky/instrument/devices/pilatus_100k.py.
+#
+# Vortex / Saturn DXP -- bluesky/instrument/devices/vortex.py defines the
+# MySaturn class but never instantiated it, and no Saturn IOC responded, so
+# the PV prefix is unknown.
 
 # TODO: Lakeshore, SRS570, Keithley DMM, Keithley source meter, capacitance bridge 2700
 # https://bcda-aps.github.io/apstools/latest/api/_devices.html#devices-other-support

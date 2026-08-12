@@ -324,6 +324,16 @@ class Lambda250kDetector(MySingleTrigger, DetectorBase):
         """Return stats channel names for use by CountersClass."""
         return [f"Stats{i}" for i in range(1, 6)]
 
+    @property
+    def plot_signals(self):
+        """Return a mapping of stats channel name -> its ``total`` signal.
+
+        Companion to :attr:`plot_options`: same names, but resolved to the
+        underlying signal so callers can inspect or change its ``kind``.
+        Used by the GUI's Detectors tab.
+        """
+        return {f"Stats{i}": getattr(self, f"stats{i}").total for i in range(1, 6)}
+
     def select_plot(self, channels):
         """Set Kind.hinted on the stats matching *channels*, Kind.normal on others.
 

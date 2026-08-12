@@ -11,3 +11,4 @@ references at call time::
 
 RE = None
 bec = None
+peaks = None
