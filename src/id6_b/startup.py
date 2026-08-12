@@ -117,6 +117,23 @@ RE(make_devices(clear=False, file="devices.yml"))  # Create the devices.
 if host_on_aps_subnet():
     RE(make_devices(clear=False, file="devices_aps_only.yml"))
 
+# Apply each device's own default configuration.  apsbits' make_devices() does
+# NOT do this, and skipping it leaves LocalScalerCH with its unnamed channels
+# at the default Kind.hinted|normal -- their empty EPICS names then reach the
+# descriptor and every scan that reads the scaler dies with
+# "ValidationError: '' does not match any of the regexes".
+# Runs before setup_baseline_stream() so baseline devices are already
+# configured when they are first read.
+for _device in oregistry.all_devices:
+    _apply_defaults = getattr(_device, "default_settings", None)
+    if callable(_apply_defaults):
+        try:
+            _apply_defaults()
+        except Exception:  # noqa: BLE001 - one bad device must not stop startup
+            logger.exception("default_settings() failed for '%s'.", _device.name)
+        else:
+            logger.debug("Applied default_settings() for '%s'.", _device.name)
+
 # Setup baseline stream with connect=False is default
 # Devices with the label 'baseline' will be added to the baseline stream.
 setup_baseline_stream(sd, oregistry, connect=False)
