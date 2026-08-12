@@ -33,6 +33,14 @@ ruff format src/             # format only
 ipython -i -c "from id6_b.startup import *"
 ```
 
+**Start the Qt session window (tabs + embedded IPython console):**
+```bash
+id6b-gui                 # after `pip install -e .`
+python -m id6_b.gui.app  # equivalent, no reinstall needed
+```
+Runs the same `from id6_b.startup import *` bootstrap in a Jupyter kernel, so
+the IPython workflow above is unaffected. See "GUI" under Architecture.
+
 **Verify installation with sim plans (inside IPython/notebook after startup):**
 ```python
 from id6_b.plans.sim_plans import *
@@ -209,6 +217,369 @@ RE(ascan(energy, 7.1, 7.15, 51, 1.0, fixq=True))  # hold HKL during energy scan
 - `plans/` — `local_scans.py`, `flyscan_demo.py`, `workflow_plan.py`, `center_maximum.py`, `local_preprocessors.py`
 - `utils/` — `counters_class.py`, `suspenders.py`, `hkl_utils.py`, `attenuator_utils.py`, `pr_setup.py`, and others
 - `callbacks/` — `dichro_stream.py`, additional SPEC/NeXus writers
+
+### GUI (`src/id6_b/gui/`)
+
+Qt window launched by `id6b-gui` (`[project.gui-scripts]` → `id6_b.gui.app:main`).
+Vertical splitter: parameter tabs on top, a real `RichJupyterWidget` IPython
+console below. Purely additive — it runs the same `from id6_b.startup import *`
+bootstrap in a Jupyter kernel, so the plain IPython workflow is untouched.
+
+- **`kernel.py`** — `KernelSession` owns a `QtKernelManager` plus **two**
+  clients: the console's, and a separate `BlockingKernelClient` used only to
+  fill the tabs. They are separate so polling stays invisible in the console
+  (`include_other_output` defaults to `False`). `autorestart` is set **False**:
+  a silent restart would drop every EPICS connection mid-experiment, and it
+  also caused qtconsole to reset the console on a spurious startup poll.
+  `StatusPoller` (1 s `QTimer`) reads two sources:
+  - `.re_md_dict.yml` — `StoredDict` writes it from a *background* thread
+    (`delay=5`), so it keeps updating **while a scan is running**. This is the
+    scan-safe source for catalog, user, proposal, beamline, and `scan_id`.
+    Resolved against the kernel's cwd, since the file is CWD-relative.
+  - `user_expressions` — only when the kernel is idle, for values that never
+    reach the file (SPEC filename, experiment paths). Uses
+    `silent=False, store_history=False`: **`silent=True` suppresses
+    `user_expressions` entirely**, and `store_history=False` keeps the console
+    prompt number intact. At most one request is in flight, which is what stops
+    a burst of queued polls when a long scan ends.
+  `wait_until_ready()` polls `kernel_info` (non-blocking, via `QTimer`) and
+  emits `ready` before anything is executed. **Do not execute before this
+  fires:** qtconsole's `_handle_status` treats the kernel's own
+  `status: starting` message as a crash-restart if it arrives while the widget
+  is executing, which produced a spurious "kernel restarted" banner and reset
+  the console. The status poller is stopped during the handshake so only one
+  reader touches the shell channel.
+
+  `bootstrap()` sends the startup cell **on the console's own client with
+  `silent=True`**, not through `console.execute()`. The cell is several hundred
+  lines of GUI helper definitions, and `execute()` echoed all of it into the
+  console and spent prompt `In [1]` on it, so the user's first command started
+  at `[2]`; `silent=True` suppresses the `execute_input` broadcast and leaves
+  the execution counter alone. It is deliberately **not** qtconsole's hidden
+  execute (`console.execute(source, hidden=True)`), which sets `_hidden` and so
+  swallows every `stream` and `error` message too — sending on the client
+  directly means the widget never registers the request, so the device-loading
+  log and any traceback still appear, inserted above the prompt the way
+  background output is. It must be the *console's* client, not the poll client:
+  separate sockets give no ordering guarantee, so the live-plot publisher
+  subscription could arrive before the import and fail on a missing `RE` —
+  which is also why it is appended to the same cell. The prompt is live while
+  this runs, where `execute()` used to block it, so a one-line notice says that
+  anything typed before startup finishes will run afterwards.
+- **`docstream.py`** — live-plot plumbing. The kernel publishes documents over
+  ZMQ (`Publisher`) into a `Proxy` + `RemoteDispatcher` running in daemon
+  threads *in the GUI process*, which re-emits them as a Qt signal on the main
+  thread. **The kernel must stay Qt-free**, which is why plotting is not done
+  there: `%matplotlib qt` *before* `id6_b.startup` breaks `import gi` (Qt vs
+  PyGObject shared-library clash, and `hklpy2`/`libhkl` need `gi`), while
+  *after* startup the RunEngine lacks the Qt teleporter it would have built at
+  construction and the next scan raises `QObject::setParent: ... different
+  thread` and **hangs the RunEngine**. Ports are chosen free at startup. The
+  publisher subscription is appended to the *same cell* as the bootstrap —
+  sending it on the poll client instead gives no ordering guarantee against the
+  console client, and it would fail on a missing `RE`.
+- **`tabs/base.py`** — `BaseTab` with `title` plus three no-op hooks:
+  `on_metadata`, `on_kernel_values`, `on_kernel_state`. A tab may also define
+  `on_document(name, doc)` to receive streamed Bluesky documents.
+- **`tabs/scanplot.py`** — `ScanPlotTab`, a live matplotlib canvas embedded via
+  `backend_qtagg` (no `pyplot`, so no global state). x comes from
+  `start["hints"]["dimensions"]`, falling back to elapsed time for `count()`.
+  **One curve per plottable detector field**, colour-matched to the curve.
+  Fields hinted by the descriptor — i.e. whatever `counters` selected — are
+  ticked by default; other numeric scalars are listed unticked. Array/image
+  keys are excluded by their non-empty `shape`. Data is kept for every field
+  regardless of tick state, so enabling a curve mid-scan shows its full
+  history, and `relim(visible_only=True)` keeps hidden curves from stretching
+  the axes. Fresh axes per run; curves stay after the scan. BEC's inline
+  console plot is unaffected, so you get a live plot *and* the after-scan
+  inline one.
+
+  **The field selectors are a scrollable panel to the right of the canvas**,
+  one row per field, with two columns: a **Plot** check box and an exclusive
+  **Mon** radio. The panel is a fixed 260 px and scrolls rather than squeezing
+  the canvas, since names like `lambda250k_stats1_total` are long. Choosing a
+  monitor divides every plotted value by that field's value **at the same
+  point** (`_values()`); the curve label becomes `It / I0` and the status line
+  says so. `_series[field]["y"]` always holds the **raw** values, so changing
+  or clearing the monitor recomputes the whole history rather than only
+  affecting new points — and the "no monitor" row (checked by default) is a
+  real member of the button group, which is how the division is switched off.
+  A zero or missing monitor reading yields `NaN`, leaving a gap instead of a
+  spike or an exception mid-scan. The monitor's own Plot box is **disabled,
+  not unticked**, so Qt keeps its state and the curve returns when the monitor
+  changes; `_shown()` treats a disabled box as not plotted. `_on_event`
+  appends every raw value *before* touching any line, because the monitor's
+  own point has to be in before a ratio can be computed.
+
+  `_clear_selectors()` calls `setParent(None)` as well as `deleteLater()` on
+  the old rows: a deferred delete is not processed until the event loop gets
+  round to it, and until then the old check box is still a child of the panel
+  and paints over the new row at its former position.
+
+  **`grid_scan`/`rel_grid_scan` render as a live image instead of curves.**
+  Detected from `start["hints"]["gridding"] == "rectilinear"` plus `shape` and
+  `extents`; `dimensions` is ordered outer(slow) first. Orientation matches
+  BEC's `LiveGrid` — the inner (fast) axis is horizontal, the outer (slow)
+  vertical — so the live image and the inline one agree. Cells are located from
+  the **readback values against `extents`**, not from event order, so snaked
+  and out-of-order points land correctly without modelling the trajectory.
+  Unvisited cells stay `NaN` (blank) so the mesh fills in visibly. An image can
+  show one channel, so in this mode the check boxes act as a selector, and both
+  scanned axes are excluded from the colour candidates. Monitor normalisation
+  applies here too: `_grid_cells` records each event's `(row, column)`, so
+  `_rebuild_grid()` recomputes the whole mesh from history when the monitor or
+  the displayed channel changes. Picking the displayed channel *as* the monitor
+  moves the image to another channel rather than showing a field of ones.
+
+  Two related colourbar defects were fixed while adding this. `_on_start` used
+  to call `_reset_state()` — which nulls `_colorbar` — before the removal
+  check, making the removal dead code and stacking a new colourbar on every
+  consecutive grid scan; `_discard_colorbar()` now runs first. And
+  `_select_grid_field()` used to null `_image`, so switching the channel
+  mid-scan created a second `imshow` *and* a second colourbar; it rebuilds in
+  place instead. (The colourbar lives in its own axes, so `axes.clear()` does
+  not remove it.)
+- **`tabs/scan.py`** — `ScanTab`: pick a plan (`count`, `ascan`, `lup`,
+  `grid_scan`, `rel_grid_scan`), detectors, axes, points and time per
+  point, and press Scan. The form encodes the argument-order difference between
+  the plans — `ascan`/`lup` share one point count across axes (a trajectory),
+  the grid plans give each axis its own (a mesh) — so it cannot build a call the
+  plan rejects. The exact command is shown before it runs and is executed with
+  `run_in_console()`, so a scan stays an ordinary interruptible, logged command
+  that the Scan plot tab draws live.
+
+  Axes come from `_gui_scan_options()`, which finds them **by capability, not
+  class**: `callable(obj.set) and hasattr(obj, "position")`, plus writable
+  root-level `Signal`s. The classes disagree — `EpicsMotor` and the hklpy2
+  pseudo axes are `PositionerBase`, `sim_motor` is a `SynAxis` (not a
+  positioner but has `set`/`position`), and `energy` is an `EnergySignal`
+  (`set` but no `position`). All three are scannable; a positioner-only walk
+  misses two of them. A movable with movable children (`mono`, `psic`, `sl1`)
+  is treated as a container, so the list offers `mono.energy` and `psic.h`
+  rather than the container. 101 axes today.
+
+  Detector checkboxes list only devices with `preset_monitor`. **The
+  `detectors=` kwarg is omitted when the selection is unchanged**, because
+  passing it makes the plan skip `_setup_detectors()` (`local_scans.py:193`) —
+  which is where the negative-time validation lives. For the same reason,
+  choosing "monitor counts" (a negative time) disables the detector
+  checkboxes and defers to the counters selection.
+
+  **Three axis rows for `ascan`/`lup`, two for the grid plans** — see
+  `scancode.axis_limit()`. Each extra row is revealed by its own check box and
+  needs the one before it, so the rows can only ever be filled in order. The
+  ceiling is a GUI limit, not a plan limit: `local_scans` only checks
+  `len(args) % 3` / `% 4`, so both families take any number of motors. The grid
+  plans are held at two because `ScanPlotTab`'s live image is 2D
+  (`rows, columns = self._grid["shape"]`), and a third dimension would be
+  silently collapsed onto the first two rather than refused. A label under the
+  rows says so when a grid plan is selected.
+
+  Every `QGridLayout` here sets **explicit column stretches**. With the default
+  all-zero stretch Qt spreads leftover width across every column, so a
+  left-aligned `QLabel` drifts ~200 px from the field it names; the label
+  columns get stretch 0, the axis combo and a trailing filler column take the
+  slack, and the numeric boxes are capped at `VALUE_WIDTH`.
+- **`scancode.py`** — the argument-order rule, in one place because both the
+  Scan tab (runs it now) and the Macro tab (writes it into a plan) need it and
+  getting it wrong is silent: `ascan`/`lup` take `motor, start, stop, ..., num,
+  time` (`len % 3 == 2`), the grid plans `motor, start, stop, num, ..., time`
+  (`len % 4 == 1`). Every numeric slot is a **string** — the Scan tab formats
+  its spin-box floats first, the Macro tab passes free text straight through so
+  a loop variable (`centre - 0.1`) survives into the generated code. Also holds
+  the shared axis-count rules — `MAX_TRAJECTORY_AXES`, `MAX_GRID_AXES`,
+  `axis_limit()`, `active_axes()` — for the same reason: the Scan tab and the
+  Macro tab's Scan component must agree on them.
+- **`tabs/macro.py`** — `MacroTab`: a component chooser on the left inserts code
+  into a Python editor on the right, which is the macro. A macro is a **Bluesky
+  plan** — one generator function run as a single `RE(macro())` — so Ctrl-C,
+  `RE.pause()` and resume apply to the whole loop rather than to whichever scan
+  is running. Everything it calls is already in the session namespace: the
+  `local_scans` plans (`startup.py:141`) and `bps` (`startup.py:110`); the
+  generated `import bluesky.plan_stubs as bps` is there so a saved file also
+  works under `%run`.
+
+  Six components — Loop, Set value, Wait, Scan, Print, Code. **Every numeric
+  field is free text, not a spin box**, which is what lets a loop variable be
+  used as a value or a scan limit; validation is "non-empty" and the real check
+  is the `compile()` on Load. Loop values are either a literal list or
+  start/stop/steps expanded into one, so the temperatures are visible in the
+  macro itself; text starting with `[`/`(` is used verbatim, so `range(...)`
+  and comprehensions work.
+
+  Generation is **one way**: the builder writes into the editor and never reads
+  it back, so nothing hand-edited is ever silently rewritten — what is saved and
+  run is exactly what is on screen. Insertion takes its indent from the cursor's
+  line (from the previous non-blank line if blank, +4 if that line ends `:`),
+  and **replaces a line whose only content is a placeholder** (`pass`, or the
+  template's `yield from bps.null()`). That is what chains the components: a
+  loop leaves the cursor on its own `pass`, so the next insert becomes the
+  loop's first statement. Tab inserts four spaces — a literal tab would raise
+  `TabError` against the generated spaces.
+
+  **Load** compiles the source in the GUI process first, so a `SyntaxError` is
+  reported with its line number and never reaches the console, and refuses a
+  function with no `yield` (`RE(f())` on a plain function fails). It then sends
+  the source with `run_in_console()`, defining the macro exactly as if pasted —
+  **nothing executes on Load**. **Run** is `RE(<name>())` for the first
+  top-level `def`, disabled until a successful Load and re-disabled as soon as
+  the text changes, so it can only call a definition the session actually has.
+  Both need the kernel idle; the editor is always editable.
+
+  Set-value targets come from `_gui_macro_targets(name)`, fetched per device on
+  demand rather than all at once (~600 names otherwise). It returns positioners
+  *and* writable signals because `walk_signals` alone is wrong for a motor —
+  `mv(sl1.top, 3)` wants the `EpicsMotor`, not `sl1.top.user_setpoint`. The
+  device combo is editable, so the fetch hangs off `currentTextChanged`, not
+  `currentIndexChanged`: `setCurrentText` on an editable combo only writes the
+  line edit and never moves the index. Files are plain `.py`, defaulting to
+  `<kernel cwd>/macros`, with the last-used directory in
+  `QSettings("APS", "id6b-gui")`.
+- **`diffract3d.py` + `tabs/diffract_panel.py`** — 3D model of the 4S+2D
+  diffractometer on the right of the HKL tab, ported from
+  `~/jwkim/python/diffract/diffractometer_bluesky.py`. The geometry constants
+  and kinematic chain are copied **verbatim** — they were matched against the
+  real instrument. Radio buttons switch between the *current* angles and the
+  last *calculated* ones; check boxes toggle the scattering plane, the ψ
+  reference vector and Q. The reference arrow is `UB @ (h2, k2, l2)`, taking UB
+  from `_gui_hkl_state()` and h2/k2/l2 from the tab's ψ reference boxes, so
+  there is one source of truth.
+
+  **Requires `vtk`, `pyvista`, `pyvistaqt`** (plus `pooch`, `scooby`), which are
+  *not* in the environment by default. `vtk`/`pyvista` are imported lazily and
+  `diffract3d.AVAILABLE` gates the panel, so the GUI runs normally without them
+  and the panel shows the install command instead. The pure-maths half
+  (`Rx/Ry/Rz`, `rot_about4`, `rotation_to_align`, `Diffractometer.chain_matrix`)
+  has no VTK dependency and is unit-testable without the packages.
+- **`hkl_bridge.py` + `tabs/hkl.py`** — `HklTab`: samples and lattices,
+  reflection table (editable h/k/l and angles) with first/second orienting
+  selection, Compute UB, mode selection, live current-position readout
+  (h k l, six angles, 2θ, ψ, ψ reference, λ/energy) and an hkl → angles
+  calculator with a Move button. A selector chooses `psic` (red "real motors"
+  banner) or `psic_sim` (green "simulated").
+
+  `hkl_bridge.HKL_HELPERS_CODE` holds the kernel-side `_gui_hkl_*` functions,
+  installed with the bootstrap. It mirrors the call sequences in
+  `utils/hkl_utils_pete.py` but **does not import it** — that module builds its
+  own `RunEngine` at module scope, which would collide with the session's.
+  Behaviours copied deliberately: `setmode`'s rule that a `vertical` mode
+  presets the horizontal detector to 0 (and vice versa) via
+  `core.solver_real_axis_names`; `setaz`'s temporary switch into a
+  `psi_constant_*` mode to write `h2/k2/l2` (`core.extras` is empty in other
+  modes, so writing without it silently does nothing) then restoring the
+  original mode; and `compute_UB`'s `forward(1, 0, 0)` after `calc_UB`, without
+  which a later `wh()` fails.
+
+  A **progress bar sits under the Move button**. The kernel's shell channel is
+  blocked for the whole move, so progress cannot be polled through it — the
+  readback PVs are watched **directly over Channel Access from the GUI
+  process** instead (`real_pvs` in `_gui_hkl_state`, read with `epics.PV`).
+  Progress is the mean fractional travel over axes that actually move. Soft
+  axes (`psic_sim`) have no PVs, so the bar goes indeterminate rather than
+  inventing a number. Completion is decided from `StatusPoller.kernel_state`
+  after a 2 s grace period, **not** from `kernel_state_changed`: that signal
+  only fires on transitions, and a quick move starts and finishes inside one
+  poll interval, which left the first version stuck on "moving…" forever.
+  A 600 s timeout stops it spinning if the kernel never comes back.
+
+  Safety: every mutating control is disabled unless the kernel is idle, and
+  **Move runs through the console** — `RE(bps.mv(...))` via
+  `BaseTab.run_in_console()` — so it uses the session RunEngine, lands in
+  history, and Ctrl-C aborts it. Move stays disabled until a successful
+  Calculate, so the confirmation can only show angles the solver returned.
+  Reflections are edited in place (`Reflection.pseudos`/`.reals` are settable).
+- **`tabs/detectors.py`** — `DetectorsTab`, a per-channel `Kind` selector
+  grouped by detector. Unlike the Scan plot check boxes, which only hide
+  already-recorded curves, this changes kernel-side configuration and so what
+  *future* scans read. **Apply is disabled unless the kernel is idle**:
+  changing `Kind` mid-scan would desync the descriptor. Applies via
+  `_gui_set_kinds()` then re-reads so the tree shows what the kernel actually
+  accepted, and refreshes on every `stop` document since plans may re-hint
+  channels themselves.
+
+  **The four kinds are radio buttons, one tree column each** (`KIND_CHOICES` =
+  `hinted` / `normal` / `config` / `omitted`), so a row is one click and the
+  tree reads down a column. The kind names appear once, in the header, which is
+  also where `KIND_TOOLTIPS` explains them (repeated on every radio). `omitted`
+  *is* offered — it is how an unnamed scaler channel is kept out of the
+  descriptor — with the tooltip warning that omitting a named channel loses its
+  readings entirely.
+
+  Three details that are easy to get wrong. `_KindRow`'s `QButtonGroup` is
+  deliberately **parentless** and owned by the row object: parented to the tree
+  it would survive `clear()` and leak one dead group per channel on every
+  refresh (there is a test asserting zero groups under the tree). The header
+  sets `setStretchLastSection(False)`, or the `omitted` column absorbs the whole
+  window width and its radio ends up an inch from the other three. And `Kind` is
+  a *flag*, so a channel can report a composite like `normal|config` that matches
+  no radio — nothing is checked, the raw value is shown in the free-text detail
+  column (column 1, which holds the PV prefix on device rows), and the row
+  contributes no change until a kind is picked.
+
+  The tab also manages **extra devices** (`counters.extra_devices`) — an Add…
+  picker over `oregistry.root_devices` lets any EPICS device (temperature,
+  capacitance, source meter) be recorded at every scan point. This is the right
+  slot for such devices: `local_scans` does `bp_count(detectors + extras, ...)`,
+  so extras are recorded but skip `configure_counts_wrapper`, which calls
+  `rd(det.preset_monitor)` on **every detector**. Only `scaler` and
+  `lambda250k` have `preset_monitor`, so putting a thermometer in
+  `counters.detectors` raises `AttributeError: preset_monitor`, while as an
+  extra it works — verified with `keithley2400`. `extra_devices_decorator`
+  demotes extras from hinted so BEC ignores them, but the Scan plot tab lists
+  every numeric scalar, so they appear there as unticked curves.
+
+  Add/remove go through `poller.execute_once()` rather than a polled
+  expression: the poller batches expressions into a single request, so a
+  mutation and a read of the same state can share a batch and the read may be
+  evaluated first, showing stale values.
+
+  Extra devices get `Kind` control too, as `<name>   (extra)` nodes in the same
+  tree. They have no `plot_signals`, so their channels come from
+  `walk_signals(include_lazy=False)` and are set by dotted attribute path
+  (`_gui_extra_kinds` / `_gui_set_extra_kinds`) — hence two helpers and two
+  editor dicts, with `_apply` routing each set to the right one. Omitted
+  signals are hidden behind a checkbox: they are not recorded anyway and on a
+  motor bundle they dominate (53 of `sl1` + `filters`' 105). Setting an extra to
+  `omitted` auto-ticks that checkbox, since the row would otherwise be filtered
+  out of the next listing and the change could not be undone.
+- **`tabs/devices.py`** — `DevicesTab`, a sortable/filterable table of
+  `oregistry.root_devices` (name, class, prefix, labels, connected). Uses
+  root devices, not `all_devices`, which also contains every sub-component
+  (~1800 entries). Fetched on demand via `BaseTab.request()` →
+  `StatusPoller.request_once()`, which merges one-off expressions into the next
+  idle poll instead of opening a second reader on the shell channel. The
+  per-device `connected` probe needs a `try`, which `user_expressions` cannot
+  express, so it calls `_gui_device_table()` — installed in the kernel by
+  `kernel.HELPERS_CODE` as part of the bootstrap cell.
+- **`tabs/status.py`** — `StatusTab`, the Session/Scan/Files overview. Derives
+  RunEngine `running` from kernel-busy, because a running plan holds the shell
+  channel and `RE.state` cannot be polled mid-scan.
+- **`app.py`** — `MainWindow`, the `TABS` list, and the toolbar. The window is
+  a vertical splitter kept at **even halves**. Two things are needed for that:
+  each tab is wrapped in a `QScrollArea` unless it sets `scrollable = False`
+  (otherwise the tallest page pins `tabs.minimumSizeHint()` at ~595 px and the
+  console is squeezed to whatever is left), and the even split is applied in
+  `showEvent` — `setSizes()` before the first show is measured against size
+  hints rather than the real geometry, so it is silently overridden. Console
+  appearance controls live here: a font-size spin box (6–32 pt) and a
+  Black/White background selector (`set_default_style("linux")` /
+  `("lightbg")`; **black is the default**). Both are remembered between
+  sessions in `QSettings("APS", "id6b-gui")` →
+  `~/.config/APS/id6b-gui.conf`. The font spin box stays in sync with
+  qtconsole's own Ctrl+= / Ctrl+- via the `font_changed` signal; changing the
+  background does not disturb the font size. When Qt reports a pixel-sized
+  font (`pointSize() == -1`) the fallback size is *applied*, not merely
+  displayed, so the spin box can never disagree with the console.
+
+**Adding a tab:** subclass `BaseTab`, set `title`, override the hooks you need,
+add the class to `TABS` in `app.py`. The window wires the poller signals to
+every tab automatically.
+
+**Restart button** does a full kernel restart, clears the console, then waits
+for `ready` before re-running the bootstrap. Note `QtKernelManager.kernel_restarted`
+fires *only* for an autorestart, never for a deliberate `restart_kernel()` — so
+the restart path must drive the bootstrap itself rather than rely on that signal.
+The button is disabled until the kernel is ready.
 
 ## Code Style
 
