@@ -59,8 +59,9 @@ queue-monitor &                           # GUI client
 4. Conditionally subscribe callbacks (NeXus writer, SPEC writer) based on `iconfig.yml` flags
 5. `RE(make_devices(file="devices.yml"))` — creates all devices via Guarneri YAML
 6. `RE(make_devices(file="devices_aps_only.yml"))` — only when on APS subnet
-7. `setup_baseline_stream(sd, oregistry)` — adds devices labeled `"baseline"` to the supplemental data stream
-8. Import `counters` singleton and `local_scans` plans into the session namespace
+7. Call `default_settings()` on every `oregistry` device that defines one — `make_devices()` does **not** do this. Required for `LocalScalerCH`: without it the unnamed scaler channels keep `Kind.hinted|normal` and their empty EPICS names break the event descriptor. Failures are logged per-device rather than aborting startup. Runs before the baseline stream is built so baseline devices are configured before their first read.
+8. `setup_baseline_stream(sd, oregistry)` — adds devices labeled `"baseline"` to the supplemental data stream
+9. Import `counters` singleton and `local_scans` plans into the session namespace
 
 ### Device configuration (`src/id6_b/configs/devices.yml`)
 
@@ -75,34 +76,50 @@ Key device groups currently active:
 | `id6_b.devices.scaler.LocalScalerCH` | Scaler/counter | `scaler` |
 | `id6_b.devices.aps_status.StatusAPS` | APS machine status (read-only) | `status_aps` |
 | `apstools.devices.mb_creator` | CRL (10 lenses) + Mirror1 motor bundles | `crl`, `mirror1` |
-| `hklpy2.creator` | E6C diffractometers (hkl, psi, q2 engines) | `psic_sim`, `psic`, `psic_psi`, `psic_q` |
+| `apstools.devices.mb_creator` | 4-blade slits; `sl1`–`sl3` add IOC-computed center/size axes, `sl4` drives center/gap directly | `sl1`, `sl2`, `sl3`, `sl4` |
+| `apstools.devices.mb_creator` | Optics table, cryostat carrier, diffractometer table, polarization analyzer | `opty2`, `cryo`, `diff`, `analy` |
+| `id6_b.devices.filters.FilterBank` | Filter/attenuator bank (transmission + energy source) | `filters` |
+| `id6_b.devices.keithley.Keithley2400` | Keithley 2400 source meter | `keithley2400` |
+| `hklpy2.creator` | E6C diffractometers (hkl, psi, q2 engines); real diffractometers use `EpicsMonochromatorRO` beam | `psic_sim`, `psic`, `psic_psi`, `psic_q` |
 | `id6_b.devices.lambda_detector.Lambda250kDetector` | Lambda 250K area detector | `lambda250k` |
 | `apstools.devices.SimulatedApsPssShutterWithStatus` | Simulated shutter | `shutter` |
 
-Several devices are **commented out** in `devices.yml` pending fixes or future work: `lakeshore340`.
+Several devices are **commented out** in `devices.yml` pending fixes or future work: `lakeshore340`; `scaler2` (live, but its IOC `.NM*` channel names duplicate `scaler1`'s, so both would emit the same data keys); and `mirr`, `rp100`, `pilatus100k`, `vortex` (ported from `bluesky/instrument/devices/` but their IOCs did not respond to `caget`).
+
+The `sl1`–`sl3` entries show the per-axis `class:` hook of `mb_creator`: the four blade motors are plain suffixes, while the IOC transform-record center/size axes use `apstools.devices.PVPositionerSoftDoneWithStop` with `readback_pv`/`setpoint_pv`/`tolerance`. The axis `prefix` is a *suffix* onto the bundle prefix, so `"6idb1:"` + `"Slit_1"` + `"Vt2.D"` → `6idb1:Slit_1Vt2.D`. YAML anchors (`&slit1_vcen` / `<<:`) keep the four pseudo-axes from repeating.
 
 ### Custom device modules (`src/id6_b/devices/`)
 
 - **`aps_undulator.py`** — `PolarUndulatorPair` wraps two `PolarUndulator` instances. Each `PolarUndulator` extends `STI_Undulator` with deadband checking (only moves if `|setpoint - readback| > energy_deadband`) and `TrackingSignal` support. `PolarUndulatorPositioner` is the custom `UndulatorPositioner` that implements this deadband logic in `set()`.
 - **`aps_status.py`** — `StatusAPS` is a simple read-only `Device` with four `EpicsSignalRO` components: ring current, desired mode, operating mode, shutter permit.
 - **`pv_positioner.py`** — `pvpositioner_factory()` dynamically creates `PVPositioner` subclasses from raw PV strings. Used in `devices.yml` for Mirror1 motors where the ophyd motor record pattern doesn't apply.
-- **`monochromator.py`** — `MonoDevice` (PseudoPositioner, prefix `6ida1:`): pseudo axis `energy` (keV, 2.6–32) with real motors `th`→`m8`, `y2`→`m11`, plus additional `thf2`→`m13`, `chi2`→`m15`. Kohzu IOC crystal parameter records (`crystal_2d`, `y_offset`, `crystal_h/k/l/a`, `crystal_type`). `pzt_thf2` is commented out pending PV confirmation.
+- **`monochromator.py`** — `MonoDevice` (PseudoPositioner, prefix `6ida1:`): pseudo axis `energy` (keV, 2.6–32) with real motors `th`→`m8`, `y2`→`m11`, plus additional `thf2`→`m13`, `chi2`→`m15`. Kohzu IOC crystal parameter records (`crystal_2d`, `y_offset`, `crystal_h/k/l/a`, `crystal_type`). `pzt_thf2` is commented out pending PV confirmation. The Kohzu IOC also provides computed readback PVs `6ida1:BraggERdbkAO` (energy, keV) and `6ida1:BraggLambdaRdbkAO` (wavelength, Å) used by the hklpy2 diffractometers.
 - **`energy_device.py`** — `EnergySignal` (ophyd `Signal`): coordinates beamline energy by moving `mono.energy` and any device in `oregistry` labeled `"track_energy"` whose `tracking` flag is enabled. Supports optional `energy_offset` per tracking device. Feedback hooks present but must be adapted to 6-ID-B's feedback system before enabling. `mono` must be created before `energy` in `devices.yml`.
-- **`scaler.py`** — `LocalScalerCH` (prefix `6idb1:scaler1`): extends `ScalerCH` with `preset_monitor` (seconds ↔ clock-count conversion for the time channel), `freq` component, `monitor` setter (selects monitor and adjusts gates), and `select_read/plot_channels()`. `default_settings()` called by `make_devices()` on startup. `select_plot_channels()` iterates all channels: unnamed ones get `Kind.omitted` (prevents empty-string keys in `data_keys`), named non-selected get `Kind.normal`, selected get `Kind.hinted`.
+- **`scaler.py`** — `LocalScalerCH` (prefix `6idb1:scaler1`): extends `ScalerCH` with `preset_monitor` (seconds ↔ clock-count conversion for the time channel), `freq` component, `monitor` setter (selects monitor and adjusts gates), and `select_read/plot_channels()`. Also `plot_signals` (channel label → signal), the companion to `plot_options` used by the GUI's Detectors tab to read and set each channel's `Kind`. `default_settings()` is called by the `default_settings` loop in `startup.py` (step 7) — **not** by `make_devices()`, which has no such hook. Without it `scaler.channels.chan32` keeps its default `Kind.hinted|normal` and its empty EPICS name reaches the descriptor, raising `ValidationError: '' does not match any of the regexes` on any scan that reads the scaler. `select_plot_channels()` iterates all channels: unnamed ones get `Kind.omitted` (prevents empty-string keys in `data_keys`), named non-selected get `Kind.normal`, selected get `Kind.hinted`.
+- **`filters.py`** — `FilterBank` (prefix `6idb1:filter:`): `transmission` (readback + `TransmissionSetpoint` write PV), `allin()`/`allout()` helpers, and a read-only `energy` `AttributeSignal` that reports `energy_beamline` or `energy_local` according to `energy_select` ("Mono"/"Local"). Ported from `bluesky/instrument/devices/filter.py`; renamed from `filter` so it no longer shadows the Python builtin.
+- **`keithley.py`** — `Keithley2400` (prefix `6idb1:K24K:`): `inp` (programmed voltage/current + ranges) and `meas` (sensed voltage/current, `sense_function`) sub-devices, plus `source_function`. Not labeled `"baseline"` — `meas.voltage` reads the EPICS UDF sentinel `9.91e37` whenever the sense function is not voltage. Ported from `bluesky/instrument/devices/keith2400.py`.
 - **`lakeshore_controllers.py`** — `LS340Device` for Lakeshore 340 temperature controller (currently disabled in devices.yml).
-- **`lambda_detector.py`** — `Lambda250kDetector` area detector with HDF5, ROI (1–4), and stats (1–5) plugins. **Enabled** in `devices.yml` with labels `["detector", "detectors"]` (no `"baseline"` — area detectors require `stage()` before reading and must not be in the baseline stream). Implements the `CountersClass` interface: `plot_options` returns `["Stats1"…"Stats5"]`; `select_plot(channels)` sets `Kind.hinted` on selected stats. Call `configure_lambda(lambda250k)` after enabling to wire up ROI/stats ports and set default kinds. Has a `setup_images()` method used by `local_scans` to configure per-scan HDF5 file paths; a `save_image_flag` attribute controls whether images are saved.
+- **`lambda_detector.py`** — `Lambda250kDetector` area detector with HDF5, ROI (1–4), and stats (1–5) plugins. **Enabled** in `devices.yml` with labels `["detector", "detectors"]` (no `"baseline"` — area detectors require `stage()` before reading and must not be in the baseline stream). Implements the `CountersClass` interface: `plot_options` returns `["Stats1"…"Stats5"]`; `select_plot(channels)` sets `Kind.hinted` on selected stats; `plot_signals` maps those names to the `statsN.total` signals for the GUI's Detectors tab. Call `configure_lambda(lambda250k)` after enabling to wire up ROI/stats ports and set default kinds. Has a `setup_images()` method used by `local_scans` to configure per-scan HDF5 file paths; a `save_image_flag` attribute controls whether images are saved.
 
 ### Key configuration files (`src/id6_b/configs/`)
 
 - **`iconfig.yml`** — master instrument config: databroker catalog name (`6idb`), metadata defaults, SPEC/NeXus enable flags, BEC settings, DM_SETUP_FILE path. Contains `AREA_DETECTOR: HDF5_FILE_TEMPLATE: "%s/%s_%05d"` used by `local_scans` to build per-scan output file paths.
-- **`devices.yml`** — active device definitions (Guarneri YAML)
+- **`devices.yml`** — active device definitions (Guarneri YAML). The `hklpy2.creator` entries for real diffractometers (`psic`, `psic_psi`, `psic_q`) use a `beam_kwargs` key to configure `EpicsMonochromatorRO` as the beam source — this is the native hklpy2 way to link the HKL solver wavelength to EPICS monochromator PVs:
+  ```yaml
+  beam_kwargs:
+    class: hklpy2.incident.EpicsMonochromatorRO
+    prefix: "6ida1:"
+    pv_energy: "BraggERdbkAO"       # → 6ida1:BraggERdbkAO  (keV readback)
+    pv_wavelength: "BraggLambdaRdbkAO"  # → 6ida1:BraggLambdaRdbkAO  (Å readback)
+  ```
+  The simulated diffractometer (`psic_sim`) has no `beam_kwargs` and uses the default `WavelengthXray` soft signal.
 - **`devices_aps_only.yml`** — `ApsMachineParametersDevice` (name `aps`), only loaded on APS subnet. Label is `"aps_machine"` (not `"baseline"`) because `ApsCycleComputedRO.get()` raises `UnboundLocalError` when APS cycle data is unavailable — a known apstools bug. Restore `"baseline"` once fixed upstream.
 
 ### Utilities (`src/id6_b/utils/`)
 
 - **`run_engine.py`** — Module-level `RE = None` and `bec = None` placeholders. `startup.py` populates these after `init_RE()`. Plans import the module (not the names) so they see the live values at call time: `from ..utils import run_engine as _re_module; _re_module.RE.md[...]`.
 
-- **`counters_class.py`** — `CountersClass` + singleton `counters`. Holds the detector list and monitor channel for scan plans. Looks up devices from `oregistry` lazily (safe to import before devices are created). `IDEAL_ORDER = ["scaler", "lambda250k"]` controls detector priority; add new detector names there as hardware is added. For a detector to appear in `counters()` it must implement `plot_options` (list of channel name strings) and `select_plot(channels)` (sets `Kind.hinted`). Usage:
+- **`counters_class.py`** — `CountersClass` + singleton `counters`. Holds the detector list and monitor channel for scan plans. Looks up devices from `oregistry` lazily (safe to import before devices are created). `IDEAL_ORDER = ["scaler", "lambda250k"]` controls detector priority; add new detector names there as hardware is added. For a detector to appear in `counters()` it must implement `plot_options` (list of channel name strings) and `select_plot(channels)` (sets `Kind.hinted`). Adding `plot_signals` (name → signal) is optional but makes the detector's channels appear in the GUI's Detectors tab for `Kind` editing. Usage:
 
 ```python
 from id6_b.utils.counters_class import counters
