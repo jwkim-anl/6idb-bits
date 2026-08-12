@@ -222,6 +222,16 @@ id6_b.devices.scaler.LocalScalerCH:
 - name: scaler
   prefix: "6idb1:scaler1"
   labels: ["scaler", "detectors", "baseline"]
+# Second scaler record in the same IOC.  It is live and counts independently
+# of scaler1, but DISABLED because its .NM1-.NM8 channel names are currently
+# identical to scaler1's.  ScalerCH renames each channel signal to its EPICS
+# .NM value, so both devices emit the same 8 data keys ("Seconds",
+# "Ion_Chamber_1", ...); reading them in one scan collides in the event
+# document.  To enable: give scaler2 distinct .NM* names in the IOC, then
+# uncomment below and add "scaler2" to IDEAL_ORDER in utils/counters_class.py.
+# - name: scaler2
+#   prefix: "6idb1:scaler2"
+#   labels: ["scaler", "detectors", "baseline"]
 
 id6_b.devices.filters.FilterBank:
 - name: filters
@@ -283,6 +293,37 @@ hklpy2.creator:
     phi: m20
     nu: m29
     delta: m18
+
+# --- Ported from bluesky/instrument/devices but IOC not reachable ------
+# Each of these was probed with caget and did not connect.  Uncomment (and
+# for pilatus/vortex, add the device module) once the IOC is running.
+#
+# Double-bounce mirror motors -- IOC "6idACS1:" not found.  Note the old
+# mirror.py is also broken as written (class Mirr, defined as Diff).
+# apstools.devices.mb_creator:
+# - name: mirr
+#   prefix: "6idACS1:"
+#   labels: ["motor_device", "baseline"]
+#   motors:
+#     m1x1: "m1"
+#     m1y1: "m2"
+#     m1x2: "m3"
+#     m1y2: "m4"
+#     m2x1: "m5"
+#     m2y1: "m6"
+#     m2x2: "m7"
+#     m2y2: "m8"
+#
+# Razorbill RP100 strain cell power supply -- neither "iocRazorbill:D1:" nor
+# "6idRazorbill:D1:" resolves.  Needs a device module ported from
+# bluesky/instrument/devices/rp100powersupply.py.
+#
+# Pilatus 100k -- neither "dp_pilatusASD:" nor "s6_pilatus:" resolves.  Needs
+# a device module ported from bluesky/instrument/devices/pilatus_100k.py.
+#
+# Vortex / Saturn DXP -- bluesky/instrument/devices/vortex.py defines the
+# MySaturn class but never instantiated it, and no Saturn IOC responded, so
+# the PV prefix is unknown.
 
 # TODO: Lakeshore, SRS570, Keithley DMM, Keithley source meter, capacitance bridge 2700
 # https://bcda-aps.github.io/apstools/latest/api/_devices.html#devices-other-support
