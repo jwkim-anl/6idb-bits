@@ -78,6 +78,145 @@ apstools.devices.mb_creator:
         stop_pv: "6idaSoft:allstop"
         stop_value: 1
 
+# --- Slits -------------------------------------------------------------
+# sl1/sl2/sl3 are JJ-style 4-blade slits.  The four blade motors are plain
+# motor records; the vertical/horizontal center and size are soft records
+# computed by the IOC (transform record "Slit_N"), so those axes use the
+# per-axis "class:" hook with PVPositionerSoftDoneWithStop.  The axis prefix
+# is a suffix onto the bundle prefix, e.g. "6idb1:" + "Slit_1" + "Vt2.D".
+- name: sl1
+  prefix: "6idb1:"
+  labels: ["slits", "baseline"]
+  motors:
+    top: "m42"
+    bot: "m41"
+    out: "m43"
+    inb: "m44"
+    vcen: &slit1_vcen
+      class: "apstools.devices.PVPositionerSoftDoneWithStop"
+      prefix: "Slit_1"
+      readback_pv: "Vt2.D"
+      setpoint_pv: "Vcenter.VAL"
+      tolerance: 0.003
+    vsize:
+      <<: *slit1_vcen
+      readback_pv: "Vt2.C"
+      setpoint_pv: "Vsize.VAL"
+      tolerance: 0.009
+    hcen:
+      <<: *slit1_vcen
+      readback_pv: "Ht2.D"
+      setpoint_pv: "Hcenter.VAL"
+      tolerance: 0.003
+    hsize:
+      <<: *slit1_vcen
+      readback_pv: "Ht2.C"
+      setpoint_pv: "Hsize.VAL"
+      tolerance: 0.003
+- name: sl2
+  prefix: "6idb1:"
+  labels: ["slits", "baseline"]
+  motors:
+    top: "m45"
+    bot: "m46"
+    out: "m47"
+    inb: "m48"
+    vcen: &slit2_vcen
+      class: "apstools.devices.PVPositionerSoftDoneWithStop"
+      prefix: "Slit_2"
+      readback_pv: "Vt2.D"
+      setpoint_pv: "Vcenter.VAL"
+      tolerance: 0.003
+    vsize:
+      <<: *slit2_vcen
+      readback_pv: "Vt2.C"
+      setpoint_pv: "Vsize.VAL"
+      tolerance: 0.003
+    hcen:
+      <<: *slit2_vcen
+      readback_pv: "Ht2.D"
+      setpoint_pv: "Hcenter.VAL"
+      tolerance: 0.003
+    hsize:
+      <<: *slit2_vcen
+      readback_pv: "Ht2.C"
+      setpoint_pv: "Hsize.VAL"
+      tolerance: 0.003
+- name: sl3
+  prefix: "6idb1:"
+  labels: ["slits", "baseline"]
+  motors:
+    top: "m1"
+    bot: "m2"
+    out: "m4"
+    inb: "m3"
+    vcen: &slit3_vcen
+      class: "apstools.devices.PVPositionerSoftDoneWithStop"
+      prefix: "Slit_3"
+      readback_pv: "Vt2.D"
+      setpoint_pv: "Vcenter.VAL"
+      tolerance: 0.003
+    vsize:
+      <<: *slit3_vcen
+      readback_pv: "Vt2.C"
+      setpoint_pv: "Vsize.VAL"
+      tolerance: 0.003
+    hcen:
+      <<: *slit3_vcen
+      readback_pv: "Ht2.D"
+      setpoint_pv: "Hcenter.VAL"
+      tolerance: 0.003
+    hsize:
+      <<: *slit3_vcen
+      readback_pv: "Ht2.C"
+      setpoint_pv: "Hsize.VAL"
+      tolerance: 0.003
+# sl4 drives center/gap directly from motor records -- no transform record.
+- name: sl4
+  prefix: "6idb1:"
+  labels: ["slits", "baseline"]
+  motors:
+    hcen: "m5"    # SL4_HCEN
+    hsize: "m6"   # SL4_HGap
+    vcen: "m7"    # SL4_VCEN
+    vsize: "m8"   # SL4_VGap
+
+# --- Sample environment / table motor bundles ---------------------------
+- name: opty2
+  prefix: "6idb1:"
+  labels: ["motor_device", "baseline"]
+  motors:
+    hu: "m14"   # upstream horizontal   (IOC .DESC "M2U")
+    hd: "m15"   # downstream horizontal (IOC .DESC "M3U")
+    v1: "m11"   # upstream inboard vertical  (IOC .DESC "M1V")
+    v2: "m12"   # upstream outboard vertical (IOC .DESC "M2V")
+    v3: "m13"   # downstream vertical        (IOC .DESC "M3V")
+- name: cryo
+  prefix: "6idb1:"
+  labels: ["motor_device", "baseline"]
+  motors:
+    x: "m34"   # Cryo Stage X
+    y: "m33"   # Cryo Stage Y
+    z: "m35"   # Cryo Stage Z
+- name: diff
+  prefix: "6idb1:"
+  labels: ["motor_device", "baseline"]
+  motors:
+    x: "m30"    # Diff_Tab_X
+    y1: "m25"   # Diff_Tab_Y1
+    y2: "m26"   # Diff_Tab_Y2
+# Polarization analyzer.  Axis names follow the IOC .DESC fields, which
+# disagree with the old bluesky/instrument/devices/pol_analyzer.py mapping
+# (it called m22 "tth" and m23 "chi").  Confirm against the hardware before
+# relying on these names.
+- name: analy
+  prefix: "6idb1:"
+  labels: ["motor_device", "baseline"]
+  motors:
+    tha: "m21"    # .DESC "tha"
+    thp: "m22"    # .DESC "thp"
+    ttha: "m23"   # .DESC "ttha"
+
 
 id6_b.devices.scaler.LocalScalerCH:
 - name: scaler
