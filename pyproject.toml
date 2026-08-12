@@ -52,6 +52,9 @@ target-version = "py311"
 
 [project.optional-dependencies]
 dev = [ "build", "isort", "mypy", "pre-commit", "pytest", "ruff",]
+# 3D diffractometer view in the GUI's HKL tab.  Optional: the GUI runs without
+# it and the panel shows an install hint instead.
+gui3d = [ "vtk<9.4.0", "pyvista", "pyvistaqt",]
 doc = [ "babel", "ipykernel", "jinja2", "markupsafe", "myst_parser", "nbsphinx", "pydata-sphinx-theme", "pygments-ipython-console", "pygments", "sphinx-design", "sphinx-tabs", "sphinx",]
 all = [ "polar-bits[dev,doc]",]
 
