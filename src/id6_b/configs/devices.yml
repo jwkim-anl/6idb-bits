@@ -260,6 +260,11 @@ hklpy2.creator:
   geometry: E6C
   labels: [ "diffractometer", "hklpy2" ]
   prefix: "6idb1:"  
+  beam_kwargs:
+    class: hklpy2.incident.EpicsMonochromatorRO
+    prefix: "6ida1:"
+    pv_energy: "BraggERdbkAO"
+    pv_wavelength: "BraggLambdaRdbkAO"
   reals:
     # MUST provide in canonical order
     # No defined motor assignments, pick different than fourc (m29-32)
@@ -274,6 +279,11 @@ hklpy2.creator:
   solver_kwargs: {"engine": "psi"}
   labels: [ "diffractometer", "hklpy2" ]
   prefix: "6idb1:"  
+  beam_kwargs:
+    class: hklpy2.incident.EpicsMonochromatorRO
+    prefix: "6ida1:"
+    pv_energy: "BraggERdbkAO"
+    pv_wavelength: "BraggLambdaRdbkAO"
   reals:
     mu: m28
     eta: m17
@@ -286,6 +296,11 @@ hklpy2.creator:
   solver_kwargs: {"engine": "q2"}
   labels: [ "diffractometer", "hklpy2" ]
   prefix: "6idb1:"  
+  beam_kwargs:
+    class: hklpy2.incident.EpicsMonochromatorRO
+    prefix: "6ida1:"
+    pv_energy: "BraggERdbkAO"
+    pv_wavelength: "BraggLambdaRdbkAO"
   reals:
     mu: m28
     eta: m17
