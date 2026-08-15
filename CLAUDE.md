@@ -605,6 +605,44 @@ def align():
   original mode; and `compute_UB`'s `forward(1, 0, 0)` after `calc_UB`, without
   which a later `wh()` fails.
 
+  **Fixed angles.** Every mode solves some real axes and holds the rest
+  constant, and for a constant axis `forward()` uses a *preset* if the mode has
+  one and otherwise the live motor reading (`hklpy2/ops.py:625`). The Mode group
+  therefore carries one row per constant axis — a **Fix check box, an angle box
+  and `deg`** — so `psic.core.presets = {"phi": 30}` no longer needs the
+  console. Unticked means *no preset*, i.e. that axis follows its motor;
+  hklpy2's own distinction, made visible rather than hidden behind an always-on
+  value box. Presets change *computed* solutions only — nothing moves — which
+  the block says in a caption.
+
+  Which axes get a row comes from **`core.constant_axis_names`**
+  (`ops.py:927`), never from parsing the mode name: `constant_phi_vertical`
+  holds `mu, phi, nu`, `lifting_detector_phi` holds `mu, eta, chi`,
+  `bissector_horizontal` only `delta`. `_rebuild_preset_rows()` runs **only when
+  the axis list changes** — values are refreshed on every state read, and
+  tearing the widgets down each time would pull the box out from under whoever
+  is typing. Old rows get `setParent(None)` *as well as* `deleteLater()`, the
+  trap `ScanPlotTab._clear_selectors` documents.
+
+  Writes are debounced 400 ms (`_presets_timer`), a clone of the ψ reference
+  boxes' `_reference_timer`, and go through `_gui_hkl_set_presets`. Three
+  details that matter:
+  - hklpy2's `presets` setter **silently drops** any axis not constant in the
+    current mode (`ops.py:862`), so the helper checks against
+    `constant_axis_names` first and names the dropped ones in its reply instead
+    of letting a typed value vanish.
+  - `_gui_hkl_set_mode` **merges** rather than assigns. It used to end with
+    `dev.core.presets = {axis: 0}`; presets are stored *per mode* and restored
+    on re-selection, so that wiped an angle the user had fixed in that mode
+    earlier — re-picking the mode silently undid their setting. It now defaults
+    the unused detector angle to 0 only when that axis has no preset yet.
+  - `_gui_hkl_calc` takes a `presets=` argument and the tab re-sends the
+    on-screen values with every Calculate, so pressing it straight after typing
+    cannot solve against a stale preset the debounce timer has not written yet.
+
+  A fixed angle decides *which* of many solutions the Move goes to, so the
+  confirmation dialog lists it.
+
   A **progress bar sits under the Move button**. The kernel's shell channel is
   blocked for the whole move, so progress cannot be polled through it — the
   readback PVs are watched **directly over Channel Access from the GUI
