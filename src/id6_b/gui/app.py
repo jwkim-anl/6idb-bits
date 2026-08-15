@@ -30,9 +30,11 @@ from qtpy.QtWidgets import QTabWidget
 from qtpy.QtWidgets import QToolBar
 from qtpy.QtWidgets import QWidget
 
+from ..mcp_server.bridge import ECHO_PREFIX as LLM_ECHO_PREFIX
 from .docstream import DocumentStream
 from .kernel import KernelSession
 from .kernel import StatusPoller
+from .tabs.agent import AgentTab
 from .tabs.detectors import DetectorsTab
 from .tabs.devices import DevicesTab
 from .tabs.hkl import HklTab
@@ -50,6 +52,7 @@ logger = logging.getLogger(__name__)
 #: Tabs shown in the upper pane, in order.  Add new BaseTab subclasses here.
 TABS = [
     StatusTab,
+    AgentTab,
     ScanTab,
     MacroTab,
     ScanPlotTab,
@@ -97,6 +100,9 @@ class MainWindow(QMainWindow):
         self.session = KernelSession(cwd)
         manager, client = self.session.start()
 
+        # Set by _build_tabs() if the Agent tab is in TABS; the restart path
+        # has to be able to disarm it whether or not it is.
+        self._agent_tab = None
         self.console = self._build_console(manager, client)
         self.tabs, self._tab_widgets = self._build_tabs()
 
@@ -126,6 +132,7 @@ class MainWindow(QMainWindow):
 
         self.poller = StatusPoller(self.session, parent=self)
         self.poller.iopub_message.connect(self.transcript.handle)
+        self.poller.iopub_message.connect(self._echo_llm)
         # Lets a tab request an occasional one-off expression, and run code
         # visibly in the console for anything with real consequence (see
         # BaseTab).
@@ -149,6 +156,30 @@ class MainWindow(QMainWindow):
         self.session.ready.connect(self._on_kernel_ready)
         self.session.wait_until_ready()
 
+    def _echo_llm(self, msg):
+        """Show an MCP client's changes in the console, as they happen.
+
+        The MCP server (:mod:`id6_b.mcp_server`) talks to this kernel on its
+        own client, so nothing it does would otherwise appear in front of the
+        operator.  Its dispatcher prints one ``[LLM]`` line per change, and
+        this puts that line in the console.
+
+        Driven from ``iopub_message`` rather than by setting qtconsole's
+        ``include_other_output``: ``BaseFrontendMixin.from_here()`` compares
+        **session** ids, not message ids, so that trait would also echo the
+        status poller's empty cell as ``[remote] In [n]:`` once a second.  The
+        session check below is what stops a ``_gui_mcp(...)`` call typed by
+        hand in the console from being printed twice.
+        """
+        if msg.get("msg_type") != "stream":
+            return
+        text = (msg.get("content") or {}).get("text") or ""
+        if not text.startswith(LLM_ECHO_PREFIX):
+            return
+        origin = (msg.get("parent_header") or {}).get("session")
+        if origin and origin == self.console.kernel_client.session.session:
+            return  # already on screen: the console asked for it itself
+        self.console.append_stream(text)
 
     def _resume_transcript(self, cwd):
         """Restart console logging where the last session left it.
@@ -199,6 +230,13 @@ class MainWindow(QMainWindow):
         widgets = []
         for tab_class in TABS:
             tab = tab_class()
+            if isinstance(tab, AgentTab):
+                # A move waiting behind another tab is a move nobody approves.
+                self._agent_tab = tab
+                index = len(widgets)
+                tab.request_arrived.connect(
+                    lambda idx=index: self.tabs.setCurrentIndex(idx)
+                )
             if tab.scrollable:
                 # Without this the tallest page sets the tab widget's minimum
                 # height (595 px with these tabs) and the splitter can never
@@ -355,6 +393,11 @@ class MainWindow(QMainWindow):
         """
         self.poller.stop()
         self.poller.reset()
+        if self._agent_tab is not None:
+            # The kernel holding the pending request is going away, and an auto
+            # window armed against the old session must not carry into the new
+            # one -- the operator armed it for work that no longer exists.
+            self._agent_tab.clear_auto_mode()
         # The console is about to be wiped; the log is not, so leave a marker
         # explaining why the transcript jumps back to In [1].
         self.transcript.note("kernel restarted")

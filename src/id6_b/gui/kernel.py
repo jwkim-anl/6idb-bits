@@ -22,7 +22,9 @@ Status comes from two sources, because the kernel is not always reachable:
 """
 
 import ast
+import json
 import logging
+import os
 import queue
 import time
 from collections import deque
@@ -35,6 +37,9 @@ from qtpy.QtCore import QObject
 from qtpy.QtCore import QTimer
 from qtpy.QtCore import Signal
 
+from ..mcp_server.bridge import MCP_HELPERS_CODE
+from ..mcp_server.motion import MOTION_HELPERS_CODE
+from ..mcp_server.session import POINTER_NAME
 from .hkl_bridge import HKL_HELPERS_CODE
 
 logger = logging.getLogger(__name__)
@@ -392,6 +397,10 @@ KERNEL_EXPRESSIONS = {
     "exp_path": "str(experiment.experiment_path)",
     "n_runs": "len(cat)",
     "cwd": "__import__('os').getcwd()",
+    # The Agent tab's whole state: the request an MCP client has parked, the
+    # recent outcomes, and whether motion requests are switched off.  Polled
+    # with the rest rather than by a reader of its own.
+    "mcp_pending": "_gui_mcp_pending_info()",
 }
 
 
@@ -417,6 +426,8 @@ class KernelSession(QObject):
         self.manager = None
         self.client = None
         self.poll_client = None
+        #: Where this session advertises its kernel for the MCP server.
+        self.pointer_path = None
         self._ready_timer = None
         self._ready_deadline = 0.0
         self._ready_last_request = 0.0
@@ -447,7 +458,46 @@ class KernelSession(QObject):
         self.poll_client.load_connection_file(self.manager.connection_file)
         self.poll_client.start_channels()
 
+        self._write_pointer()
         return self.manager, self.client
+
+    def _write_pointer(self):
+        """Advertise this kernel to the MCP server.
+
+        A small file in the kernel's own working directory, so a server started
+        anywhere inside the session's directory tree finds it by walking up.
+        Deliberately not ``jupyter_client``'s runtime directory, whose newest
+        entry may be an unrelated notebook -- attaching to the wrong kernel is
+        the one failure this must not have.
+        """
+        self.pointer_path = Path(self.cwd) / POINTER_NAME
+        try:
+            self.pointer_path.write_text(
+                json.dumps(
+                    {
+                        "connection_file": self.manager.connection_file,
+                        "pid": os.getpid(),
+                        "started": time.time(),
+                        "cwd": self.cwd,
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
+        except OSError:
+            # A read-only session directory costs the MCP server, nothing else.
+            logger.warning("Could not write %s.", self.pointer_path, exc_info=True)
+            self.pointer_path = None
+
+    def _remove_pointer(self):
+        """Withdraw the advertisement, so nothing attaches to a dead kernel."""
+        if self.pointer_path is None:
+            return
+        try:
+            self.pointer_path.unlink(missing_ok=True)
+        except OSError:
+            logger.debug("Could not remove %s.", self.pointer_path, exc_info=True)
+        self.pointer_path = None
 
     def wait_until_ready(self, timeout_s=180.0):
         """Emit :attr:`ready` once the kernel answers, without blocking.
@@ -521,7 +571,13 @@ class KernelSession(QObject):
         publisher subscription) could arrive before the import and fail on a
         missing ``RE``.  It is appended to this same cell for that reason.
         """
-        parts = [BOOTSTRAP_CODE, HELPERS_CODE, HKL_HELPERS_CODE]
+        parts = [
+            BOOTSTRAP_CODE,
+            HELPERS_CODE,
+            HKL_HELPERS_CODE,
+            MCP_HELPERS_CODE,
+            MOTION_HELPERS_CODE,
+        ]
         if follow_up_code:
             parts.append(follow_up_code)
 
@@ -563,6 +619,7 @@ class KernelSession(QObject):
 
     def shutdown(self):
         """Stop the readiness timer and both clients, then kill the kernel."""
+        self._remove_pointer()
         if self._ready_timer is not None:
             self._ready_timer.stop()
         for client in (self.poll_client, self.client):
