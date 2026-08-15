@@ -75,6 +75,8 @@ OPTIONS_EXPR = "_gui_scan_options()"
 DEVICES_KEY = "device_table"
 DEVICES_EXPR = "_gui_device_table()"
 TARGETS_KEY = "macro_targets"
+PEAK_FIELDS_KEY = "peak_fields"
+PEAK_FIELDS_EXPR = "_gui_peak_fields()"
 
 INDENT = "    "
 
@@ -249,6 +251,9 @@ class _Form(QWidget):
 
     def set_devices(self, names):
         """Receive the root device names."""
+
+    def set_peak_fields(self, names):
+        """Receive the detector field names the last scan produced peaks for."""
 
     def _line(self, text="", placeholder=""):
         edit = QLineEdit(text)
@@ -640,6 +645,113 @@ class ScanForm(_Form):
         return [f"yield from {call}"], None
 
 
+class PeakForm(_Form):
+    """``yield from cen()`` and friends -- move onto the last scan's peak.
+
+    The Scan plot tab's buttons emit a literal ``mv`` because the value is
+    already on screen.  Here the *plan* has to be emitted instead: a macro is
+    written before the scan it will align on, so the peak position cannot be
+    known at generation time.
+    """
+
+    label = "Go to peak"
+
+    #: Display name -> plan name in the session namespace.
+    STATISTICS = (
+        ("center of the peak", "cen"),
+        ("maximum", "maxi"),
+        ("minimum", "mini"),
+        ("center of mass", "com"),
+    )
+
+    def __init__(self, on_change, parent=None):
+        """Build the statistic selector and the three optional fields."""
+        super().__init__(on_change, parent)
+        outer = QVBoxLayout(self)
+        grid = QGridLayout()
+
+        grid.addWidget(QLabel("Go to"), 0, 0)
+        self._statistic = QComboBox()
+        for text, _plan in self.STATISTICS:
+            self._statistic.addItem(text)
+        self._statistic.currentIndexChanged.connect(lambda _i: self._changed())
+        grid.addWidget(self._statistic, 0, 1)
+
+        grid.addWidget(QLabel("Axis"), 1, 0)
+        self._axis = QComboBox()
+        self._axis.setEditable(True)
+        self._axis.currentTextChanged.connect(lambda _t: self._changed())
+        self._axis.setToolTip("Leave blank to use the axis the last scan scanned.")
+        grid.addWidget(self._axis, 1, 1)
+
+        grid.addWidget(QLabel("Detector"), 2, 0)
+        self._detector = QComboBox()
+        self._detector.setEditable(True)
+        self._detector.currentTextChanged.connect(lambda _t: self._changed())
+        self._detector.setToolTip(
+            "Detector field name, e.g. scaler_It.  Leave blank when the scan "
+            "has only one hinted detector."
+        )
+        grid.addWidget(self._detector, 2, 1)
+
+        grid.addWidget(QLabel("Monitor"), 3, 0)
+        self._monitor = QComboBox()
+        self._monitor.setEditable(True)
+        self._monitor.currentTextChanged.connect(lambda _t: self._changed())
+        self._monitor.setToolTip(
+            "Divide the detector by this field before finding the peak, e.g. "
+            "scaler_I0.  Leave blank for the raw detector."
+        )
+        grid.addWidget(self._monitor, 3, 1)
+
+        grid.setColumnStretch(0, 0)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 1)
+        outer.addLayout(grid)
+
+        note = QLabel(
+            "Uses the most recent scan, so put this straight after one. Blank "
+            "fields are inferred at run time and raise rather than guess when "
+            "the scan was ambiguous. The lists are suggestions from the last "
+            "scan; any field name can be typed."
+        )
+        note.setWordWrap(True)
+        outer.addWidget(note)
+
+    def set_axes(self, paths):
+        """Fill the axis combo, keeping the current choice and the blank."""
+        current = self._axis.currentText()
+        self._axis.clear()
+        self._axis.addItem("")
+        self._axis.addItems(paths)
+        self._axis.setCurrentText(current)
+
+    def set_peak_fields(self, names):
+        """Fill the detector and monitor suggestions from the last scan."""
+        for combo in (self._detector, self._monitor):
+            current = combo.currentText()
+            combo.clear()
+            combo.addItem("")
+            combo.addItems(names)
+            combo.setCurrentText(current)
+
+    def lines(self):
+        """Return the plan call, as a ``yield from``."""
+        plan = self.STATISTICS[max(self._statistic.currentIndex(), 0)][1]
+        arguments = []
+        axis = self._axis.currentText().strip()
+        if axis:
+            arguments.append(axis)
+        for keyword, combo in (
+            ("detector", self._detector),
+            ("monitor", self._monitor),
+        ):
+            text = combo.currentText().strip()
+            if text:
+                arguments.append(f"{keyword}={text!r}")
+        return [f"yield from {plan}({', '.join(arguments)})"], None
+
+
 class PrintForm(_Form):
     """``print(f"...")`` -- a progress note in the console."""
 
@@ -749,6 +861,7 @@ class MacroTab(BaseTab):
             SetForm(self._update_preview, self._fetch_targets),
             WaitForm(self._update_preview),
             ScanForm(self._update_preview),
+            PeakForm(self._update_preview),
             PrintForm(self._update_preview),
             CodeForm(self._update_preview),
         ]
@@ -825,8 +938,14 @@ class MacroTab(BaseTab):
     # -- kernel exchange --------------------------------------------------
 
     def refresh(self):
-        """Re-read the axis and device lists."""
-        self.request({OPTIONS_KEY: OPTIONS_EXPR, DEVICES_KEY: DEVICES_EXPR})
+        """Re-read the axis, device and peak-field lists."""
+        self.request(
+            {
+                OPTIONS_KEY: OPTIONS_EXPR,
+                DEVICES_KEY: DEVICES_EXPR,
+                PEAK_FIELDS_KEY: PEAK_FIELDS_EXPR,
+            }
+        )
 
     def on_kernel_state(self, state):
         """Load and Run are only safe while the kernel is idle."""
@@ -836,7 +955,7 @@ class MacroTab(BaseTab):
         self._update_enabled()
 
     def on_kernel_values(self, values):
-        """Fill the axis, device and target lists as replies arrive."""
+        """Fill the axis, device, peak-field and target lists as replies arrive."""
         options = values.get(OPTIONS_KEY)
         if isinstance(options, dict):
             paths = [path for path, _class in options.get("axes", [])]
@@ -847,6 +966,10 @@ class MacroTab(BaseTab):
             names = [row[0] for row in rows]
             for form in self._forms:
                 form.set_devices(names)
+        fields = values.get(PEAK_FIELDS_KEY)
+        if isinstance(fields, list):
+            for form in self._forms:
+                form.set_peak_fields(fields)
         targets = values.get(TARGETS_KEY)
         if isinstance(targets, list):
             for form in self._forms:

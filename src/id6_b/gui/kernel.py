@@ -266,6 +266,25 @@ def _gui_scan_options():
     }
 
 
+def _gui_peak_fields():
+    """Return the detector *field* names the last scan can give a peak for.
+
+    Suggestions only: the Macro tab's Peak component takes free text, because
+    a macro is usually written before the scan whose peak it will use.
+
+    Read through ``center_maximum`` rather than off ``bec.peaks`` so the list
+    is exactly what ``cen()`` will accept -- and because ``peaks`` is filled in
+    asynchronously under a Qt backend (see ``plans/center_maximum.py``).
+    """
+    from id6_b.plans.center_maximum import _hinted_detectors
+    from id6_b.utils import run_engine as _re
+
+    try:
+        return sorted(_hinted_detectors(_re.cat[-1]))
+    except Exception:
+        return []
+
+
 def _gui_macro_targets(name):
     """Return [(dotted_path, class_name, kind)] that ``mv()`` can drive on *name*.
 
