@@ -81,6 +81,7 @@ import id6_b.utils.run_engine as _re_module  # noqa: E402
 _re_module.RE = RE
 _re_module.bec = bec
 _re_module.peaks = peaks
+_re_module.cat = cat
 
 # NeXus writer — imported for use by local_scans (subscribed per-scan, not globally).
 from .callbacks.nexus_data_file_writer import nxwriter  # noqa: F401, E402
