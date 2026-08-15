@@ -150,6 +150,15 @@ from id6_b.plans.local_scans import (  # noqa: F401, E402
     mvr,
     rel_grid_scan,
 )
+from id6_b.plans.center_maximum import (  # noqa: F401, E402
+    cen,
+    cen2,
+    com,
+    maxi,
+    maxi2,
+    mini,
+    mini2,
+)
 from id6_b.utils.experiment_utils import (  # noqa: F401, E402
     experiment,
     experiment_change_sample,
