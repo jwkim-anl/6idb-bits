@@ -777,6 +777,37 @@ def align():
   watching the log grow is worth anything — and not `kernel_state_changed`,
   which only fires on transitions. The timer also notices a transcript that
   closed *itself* on a write failure and puts the controls back.
+- **`tabs/agent.py`** — `AgentTab`, where the human sits in the loop for
+  anything an MCP client asks to move (see "MCP server" below for the layer
+  that parks the requests). Its own tab rather than a banner in the HKL tab:
+  the scope covers slits, the sample stage and scans as well as the
+  diffractometer, and one place to look beats three.
+
+  - **The pending card** — device, what will move, the solved angles for an
+    hkl move, the exact command, when it was asked, and whether a guard was
+    overridden — with **Approve** / **Reject**. Approve runs
+    `_gui_mcp_execute('<token>')  # <command>` through `run_in_console()`;
+    Reject goes out invisibly through `poller.execute_once()` as
+    `_gui_mcp_cancel(...)`, since a refusal is not something to read back later.
+  - **Auto mode** — `Allow LLM moves without asking`, with a duration
+    (30 min default, 1–240) and a live countdown. Unchecked at construction and
+    unchecked again by `app.py`'s restart path (`clear_auto_mode()`), so it can
+    never be inherited from a previous session or survive a kernel restart.
+    While live, a request is approved on arrival **through the same
+    `_gui_mcp_execute` path** — one code path for motion, not two.
+  - **Refuse all motion requests**, the master off switch, enforced kernel-side
+    so a request is declined with a sentence the model can act on rather than
+    sitting unanswered. `on_kernel_values` mirrors the kernel's `blocked` flag
+    into the box **with signals blocked**, so following the kernel never echoes
+    a write back at it.
+  - **History**, so "what did it do while I was at lunch" has an answer that
+    does not need the transcript.
+
+  `_acted` (a set of tokens already answered) guards both the button and auto
+  mode: the console runs asynchronously, so the next poll can still show a
+  request that is about to start, and without it auto mode would approve the
+  same token twice.
+
 - **`app.py`** — `MainWindow`, the `TABS` list, and the toolbar. The window is
   a vertical splitter kept at **even halves**. Two things are needed for that:
   each tab is wrapped in a `QScrollArea` unless it sets `scrollable = False`
@@ -794,6 +825,22 @@ def align():
   font (`pointSize() == -1`) the fallback size is *applied*, not merely
   displayed, so the spin box can never disagree with the console.
 
+  `_echo_llm` puts an MCP client's changes on screen: for a `stream` message
+  whose text starts with `[LLM]` and whose `parent_header["session"]` is not the
+  console's own, it calls `console.append_stream(text)`. Driven off
+  `poller.iopub_message` rather than qtconsole's `include_other_output`, because
+  `BaseFrontendMixin.from_here()` compares **session ids, not msg ids** — the
+  trait would also echo `StatusPoller`'s empty 1 Hz cell as `[remote] In [n]:`
+  once a second. The session check is what stops a `_gui_mcp(...)` call typed by
+  hand in the console from being printed twice.
+
+  It also **raises the Agent tab** when a request arrives
+  (`AgentTab.request_arrived` → `tabs.setCurrentIndex`): a move waiting behind
+  another tab is a move nobody approves. `_do_restart()` calls
+  `clear_auto_mode()` on it. Both are guarded by `self._agent_tab is not None`,
+  set in `_build_tabs`, so the restart path works whether or not `AgentTab` is
+  in `TABS`.
+
 **Adding a tab:** subclass `BaseTab`, set `title`, override the hooks you need,
 add the class to `TABS` in `app.py`. The window wires the poller signals to
 every tab automatically.
@@ -803,6 +850,253 @@ for `ready` before re-running the bootstrap. Note `QtKernelManager.kernel_restar
 fires *only* for an autorestart, never for a deliberate `restart_kernel()` — so
 the restart path must drive the bootstrap itself rather than rely on that signal.
 The button is disabled until the kernel is ready.
+
+### MCP server (`src/id6_b/mcp_server/`)
+
+An MCP server that lets an LLM run the experiment in words: the **HKL setup**
+— sample, lattice, reflections, UB, geometry mode, fixed angles, ψ reference,
+hkl → angles — plus **motion and scans behind a human-in-the-loop gate**, in a
+**running GUI session**, so the result appears in the HKL tab and is what
+subsequent scans use. Run over stdio as `id6b-mcp`, next to `id6b-gui`.
+
+Needs the SDK, which is not part of a plain install: `conda activate 6idb-bits
+&& pip install mcp` (the `mcp` extra). Installed in `6idb-bits` as `mcp` 2.0.0.
+Adding the `id6b-mcp` script to an existing editable checkout needs
+`pip install -e . --no-deps --no-build-isolation`.
+
+**Both diffractometers, but the real one must be named.** `ALLOWED_DEVICES =
+{"psic_sim", "psic"}`; every tool takes `device=` and defaults to `psic_sim`,
+so reaching the real machine is always an explicit act. `psic_psi`/`psic_q`
+stay out — separate engines on the same motors, and nothing here needs them.
+The allow-list is checked **in the kernel**, so a bug in the server, or a
+second client that found the connection file, is still bounded by it.
+
+#### The invariant
+
+> **The MCP layer can only ever *request*. The only process that emits motion
+> is the GUI, and only from a human click or an operator-armed auto window.**
+
+Mechanically: `_gui_mcp` never calls `RE(...)`. A motion or scan op *validates*
+and parks a request; the Agent tab sees it on the existing 1 Hz poll and, on
+Approve, runs `_gui_mcp_execute(token)` through `BaseTab.run_in_console()` —
+the same path the HKL tab's Move button uses. Every LLM-originated motion is
+therefore an ordinary console command: in the history, in the transcript,
+interruptible with Ctrl-C, on the session RunEngine.
+
+It also sidesteps a problem that would otherwise be nasty. A running plan holds
+the kernel's shell channel and `_probe_idle()` refuses rather than queueing, so
+a *blocking* MCP move would exceed `CALL_TIMEOUT` and leave every later call
+reporting "busy". Requests return in milliseconds; progress is followed from
+outside the kernel (`status()`, below).
+
+Four layers, split so the middle two are testable before the SDK exists:
+
+- **`bridge.py`** — `MCP_HELPERS_CODE`, the kernel-side dispatcher, appended to
+  `parts` in `KernelSession.bootstrap()` next to `HKL_HELPERS_CODE`. Every
+  operation is one of the existing `_gui_hkl_*` functions; this module adds no
+  diffractometer logic. Entry point `_gui_mcp(payload)`, where `payload` is a
+  **JSON string** — the only value interpolated into executed code, sent through
+  `repr()`, so a sample name cannot become code.
+
+  **The two allow-lists live here, not in the server.** `_GUI_MCP_DEVICES`
+  (`ALLOWED_DEVICES = {"psic_sim", "psic"}`) is checked in the kernel, so a bug
+  in the server — or a second, unofficial client that found the connection file
+  — is bounded by it; enforcing it client-side would be a comment, not a
+  control. `op` likewise indexes an explicit dict of
+  op → `(function, argnames, mutating)`; nothing is `getattr`'d off the payload,
+  and unexpected argument names are refused by name. Each entry also records
+  which devices it accepts, so an axis move cannot arrive addressed to a
+  diffractometer engine and an hkl op cannot arrive addressed to
+  `SESSION_DEVICE` (`"session"`, the sentinel for the ops that are not about
+  one diffractometer — axes, scans, counters, the request queue).
+
+  Before every mutating op the previous `dev.sample.UB` is stashed in
+  `_gui_mcp_ub_backup`, which `restore_ub` reads — `compute_ub` on two mistyped
+  reflections otherwise destroys a working orientation with no way back. One
+  level of undo, UB only.
+
+  A mutating op prints one `[LLM]` line pair for the operator to read:
+
+  ```
+  [LLM] set_lattice(psic_sim): values(a=5.43)
+  [LLM]   -> Lattice updated. UB computed from r1 and r2.
+  ```
+
+  It is **one `print()` with the prefix on every line**, because the GUI selects
+  the lines to echo by that prefix and a stream message the kernel happened to
+  split would otherwise lose its tail. Reads print nothing.
+
+  `FAILURE_PREFIXES` maps the `_gui_hkl_*` refusal sentences onto the `ok` flag.
+  Advisory only — the message is always returned and is the authoritative
+  answer, since those helpers report errors as prose rather than raising.
+
+- **`motion.py`** — `MOTION_HELPERS_CODE`, a second kernel string appended to
+  the same bootstrap cell so `bridge.py` stays readable. Same namespace, and
+  `_gui_mcp_ops()` resolves names at call time, so the order of the two strings
+  does not matter. It holds the request/approve state machine.
+
+  *State* — `_gui_mcp_pending` (**one** request at a time; a second is refused
+  in words, which is also what stops a model retrying itself into a queue of
+  moves), `_gui_mcp_history` (the last `HISTORY_LIMIT` outcomes, for the Agent
+  tab) and `_gui_mcp_motion_blocked` (the GUI's master off switch).
+
+  *Requests.* `_gui_mcp_request_hkl` **solves first**, through the existing
+  `_gui_hkl_calc`, so the six angles are known before anyone is asked to
+  approve — and the parked command moves *those angles*, not `h/k/l`: moving
+  the pseudo axes would solve again at execution time, against whatever the
+  presets and the wavelength are by then, which is not what the operator saw on
+  the banner. `_gui_mcp_request_axes` takes dotted path → number, resolved
+  against the axis list `_gui_scan_options()` already builds, which is the
+  allow-list for this op (101 axes, containers excluded); anything else is
+  refused by name. `_gui_mcp_request_scan` builds the call with
+  `gui/scancode.py:format_scan_call()`, so the Scan tab, the Macro tab and the
+  model cannot disagree about `ascan`'s argument order; a scan moves motors, so
+  it goes through the same gate.
+
+  *Guards* — `_gui_mcp_check_targets()`, run at request time and **again**
+  inside `_gui_mcp_execute`, since minutes may pass at the banner:
+
+  1. **Soft limits.** `positioner.check_value(target)` where it exists (ophyd
+     raises `LimitError`, the canonical check, and it covers pseudo axes),
+     falling back to `.limits`. Every axis is checked before anything is parked
+     and one failure refuses the whole request — no partial move, ever. The
+     refusal leads with the axis and its limits and keeps ophyd's own text in
+     brackets after it: `LimitError` names the *setpoint signal* and says
+     "outside of range", which reads as an internal error rather than as an
+     instruction.
+  2. **Maximum travel.** `MAX_TRAVEL_DEG = 90.0` for diffractometer angles,
+     plus a unit-free `MAX_TRAVEL_FRACTION = 0.5` of the soft-limit span for
+     any axis with finite limits — a single absolute cap cannot mean the same
+     thing in degrees, mm, keV and kelvin. **The numbers are deliberately
+     loose**: driving to a reflection from the home position is routinely 40–60°
+     on eta, so a tighter cap would refuse the *first* move of nearly every
+     experiment and teach a client to pass `allow_large_move` by habit — which
+     is how a guard stops being one. This one catches a decimal point in the
+     wrong place; the approval banner is the real protection. `allow_large_move`
+     lifts both, and the banner says when it was used.
+
+  *Approval* — `_gui_mcp_execute(token)` re-validates, prints the `[LLM]` lines
+  and *then* runs `RE(...)`. The GUI sends it as
+  `_gui_mcp_execute('a1b2c3')  # RE(bps.mv(psic.eta, 12.5, …))` — the trailing
+  comment carries the readable command into the console and the transcript,
+  while the re-validation stays kernel-side where a client cannot skip it.
+  `_gui_mcp_cancel(token, reason)` clears a rejected, withdrawn or expired one.
+
+  *Reads*, all in `MOTION_READ_OPS` so they print nothing and leave nothing in
+  the transcript: `_gui_mcp_list_axes()` (`axis`, `class`, `position`, `low`,
+  `high`), `_gui_mcp_read_axes()` (`values` + `unknown`), `_gui_mcp_counters()`
+  and `_gui_mcp_last_scan()` (scan id, plan, motors, and the peak statistics
+  from `utils/peak_statistics.py` — the same numbers the Scan plot tab shows).
+
+- **`session.py`** — `HklSession`, a plain `BlockingKernelClient` with one
+  method that matters, `call(op, **args)`. **No `mcp` import**, which is what
+  makes the whole path above testable before the SDK is installed and keeps
+  `server.py` a declaration of tools and nothing else.
+
+  *Discovery.* The GUI writes `.id6b-gui-kernel.json` into its kernel's cwd;
+  `find_pointer()` walks up from the current directory, so a client launched
+  anywhere inside the session's tree finds it. `ID6B_GUI_KERNEL_FILE` and
+  `--connection-file` override, and `resolve_connection_file()` tells a pointer
+  file from a connection file by content so the wrong one still works.
+  Deliberately **not** `jupyter_client.find_connection_file()`, whose
+  no-argument form returns the newest runtime file — possibly an unrelated
+  notebook, and attaching to the wrong kernel is the one failure this must not
+  have. A pointer whose `pid` is dead is refused with a sentence.
+
+  *Reply channel.* The value comes back through `user_expressions`, the same
+  round trip `StatusPoller._collect_reply` uses — not `execute_result`.
+  **Reads and mutations are sent differently, on purpose:**
+
+  ```python
+  if op in READ_OPS:      # empty code -> no execute_input on iopub at all
+      code, expressions = "", {"r": expression}
+  else:                   # real code -> console + transcript keep it
+      code = f"{REPLY_NAME} = {expression}"
+      expressions = {"r": "_gui_mcp_last"}
+  ```
+
+  A model polling `get_state` therefore leaves nothing in the console or the
+  log, while a change is on the record. The mutating form **assigns** rather
+  than calling bare: a bare call is an expression, and IPython displays its JSON
+  as `Out[n]`, burying the readable `[LLM]` line. A trailing `;` does *not*
+  suppress that here — measured, not assumed. `REPLY_NAME` is `_gui_mcp_reply`,
+  not `_`, which is IPython's own last-output variable.
+
+  `call()` takes a **per-call** `device` (defaulting to `psic_sim`) rather than
+  a fixed one, and `ALL_READ_OPS = READ_OPS | MOTION_READ_OPS`, so the motion
+  reads stay invisible too.
+
+  *Status without the kernel.* While a move or a scan runs the shell channel is
+  blocked and every kernel call is refused by design — so `status()` does not
+  use it. Two sources, both already proven elsewhere in this package:
+  **Channel Access from the client process** (`epics.PV`, exactly as the HKL
+  tab's progress bar does) over the readback PVs cached from `real_pvs`
+  whenever state was last read while idle; and **`.re_md_dict.yml`** in the
+  kernel's cwd for `scan_id` and metadata, which `StoredDict` writes from a
+  background thread and is therefore readable *during* a scan. A very early
+  call — before any state read — has no PVs cached and says so.
+
+  *Never queue behind a scan.* A running plan holds the shell channel and a
+  request sent to a busy kernel is **queued** — it would run when the scan ends,
+  possibly an hour later, silently changing an orientation long after anyone
+  asked. `_probe_idle()` sends an empty silent no-op first and refuses within
+  `PROBE_TIMEOUT` (3 s) if it does not come back, with a sentence the model can
+  act on; a queued probe that lands later executes nothing. `call()` never
+  raises — transport failures come back in the same `{"ok", "message", "data"}`
+  shape as a refusal, so a caller does not have to tell them apart by type.
+
+- **`server.py`** — the protocol layer: 27 tools, each one line into
+  `HklSession.call`, plus `build()` and `main()` (the `id6b-mcp` console
+  script). Under `[project.scripts]`, **not** `[project.gui-scripts]`, which on
+  Windows builds a console-less launcher whose stdout — the protocol channel —
+  goes nowhere. A missing SDK prints the install command to **stderr** for the
+  same reason.
+
+  `_server_class()` accepts **either SDK generation**: `mcp` 2.0 renamed
+  `mcp.server.fastmcp.FastMCP` to `mcp.server.MCPServer`, and `@server.tool()`
+  and `run()` are the same on both, so the rename does not reach the tool
+  declarations. `version` is passed only when the constructor takes it — on 1.x
+  an unknown keyword lands in the settings object and raises.
+
+  The real work here is the descriptions. They carry the ordering rules that
+  make hklpy2 setup succeed and that are otherwise invisible at the keyboard:
+  mode before the angles it holds constant (which axes *can* be fixed changes
+  with the mode), two orienting reflections before a UB, a `psi_constant` mode
+  before a fixed ψ, an axis left out of `set_fixed_angles` having *no* preset
+  rather than its current value. `hkl_add_reflection` with `angles` omitted uses
+  the **live motor positions** — the intended division of labour: the human
+  drives to the peak, the model does the bookkeeping.
+
+  The ten added by this feature:
+
+  | Tool | Notes |
+  |---|---|
+  | `move_hkl(h, k, l, device, allow_large_move)` | solves, validates, requests approval |
+  | `move_axes(targets, allow_large_move)` | dotted paths → values; one refusal fails all |
+  | `run_scan(plan, axes, points, time, detectors, fixq)` | `count`/`ascan`/`lup`/`grid_scan`/`rel_grid_scan` |
+  | `get_request_status()` / `cancel_request(reason)` | poll or withdraw the parked request |
+  | `list_axes()` / `read_axes(axes)` | positions and soft limits |
+  | `get_counters()` / `get_last_scan()` | selection, monitor, peak statistics |
+  | `get_session_status()` | kernel-free: busy flag, scan id, readbacks over CA |
+
+  Their descriptions carry the gate the same way: that a move **returns before
+  it happens**, that the answer is "awaiting approval", that the model should
+  poll `get_request_status` and must not re-request in the meantime, and that a
+  guard refusal is a reason to ask the operator rather than to retry with
+  `allow_large_move`.
+
+**No collision model.** The soft limits are the IOC's per-axis limits; they say
+nothing about the detector arm meeting the cryostat or the analyzer. The
+approval banner showing the solved angles is the real protection, and auto mode
+gives that up for its window — which is why it is time-boxed, off by default,
+and cleared by a kernel restart. There is one level of undo (UB) and **none for
+motion**; `list_axes()`/`read_axes()` before a move is the model's own escape
+route.
+
+**Known wart:** because `store_history=False`, the transcript shows
+`In [1]: _gui_mcp_reply = _gui_mcp('{"op": …}')` and the operator's next real
+command reuses that prompt number. Redundant next to the `[LLM]` line, but it is
+the exact bytes that were sent.
 
 ## Code Style
 
