@@ -22,6 +22,7 @@ id6_b.devices.aps_status.StatusAPS:
 
 apstools.devices.mb_creator:
 - name: crl
+  labels: ["crl", "baseline"]
   prefix: "6idbSoft:TRANS:"
   motors: 
     ytrans: "m1"
@@ -39,9 +40,15 @@ apstools.devices.mb_creator:
     lens8: "m13"
     lens9: "m14"
     lens10: "m15"
+- name: mirr1
+  labels: ["mirror", "baseline"]
+  prefix: "6ida1:"
+  motors: 
+    bender: "m39"
 - name: mirror1
+  labels: ["mirror", "baseline"]
   motors:
-    angle:
+    y_angle:
       factory:
         function: "id6_b.devices.pv_positioner.pvpositioner_factory"
         readback_pv: "6idaSoft:M1yt2.C"
@@ -74,6 +81,117 @@ apstools.devices.mb_creator:
         readback_pv: "6idaSoft:M1yt2.B"
         setpoint_pv: "6idaSoft:M1yup"
         done_pv: "6idaSoft:M1yDMOV"
+        done_value: 1
+        stop_pv: "6idaSoft:allstop"
+        stop_value: 1
+    x_angle:
+      factory:
+        function: "id6_b.devices.pv_positioner.pvpositioner_factory"
+        readback_pv: "6idaSoft:M1xt2.C"
+        setpoint_pv: "6idaSoft:M1xangl"
+        done_pv: "6idaSoft:M1xDMOV"
+        done_value: 1
+        stop_pv: "6idaSoft:allstop"
+        stop_value: 1
+    x_avg:
+      factory:
+        function: "id6_b.devices.pv_positioner.pvpositioner_factory"
+        readback_pv: "6idaSoft:M1xt2.D"
+        setpoint_pv: "6idaSoft:M1xavg"
+        done_pv: "6idaSoft:M1xDMOV"
+        done_value: 1
+        stop_pv: "6idaSoft:allstop"
+        stop_value: 1
+    x_down:
+      factory:
+        function: "id6_b.devices.pv_positioner.pvpositioner_factory"
+        readback_pv: "6idaSoft:M1xt2.A"
+        setpoint_pv: "6idaSoft:M1xdn"
+        done_pv: "6idaSoft:M1xDMOV"
+        done_value: 1
+        stop_pv: "6idaSoft:allstop"
+        stop_value: 1
+    x_up:
+      factory:
+        function: "id6_b.devices.pv_positioner.pvpositioner_factory"
+        readback_pv: "6idaSoft:M1xt2.B"
+        setpoint_pv: "6idaSoft:M1xup"
+        done_pv: "6idaSoft:M1xDMOV"
+        done_value: 1
+        stop_pv: "6idaSoft:allstop"
+        stop_value: 1
+- name: mirror2
+  labels: ["mirror", "baseline"]
+  motors:
+    y_angle:
+      factory:
+        function: "id6_b.devices.pv_positioner.pvpositioner_factory"
+        readback_pv: "6idaSoft:M2yt2.C"
+        setpoint_pv: "6idaSoft:M2yangl"
+        done_pv: "6idaSoft:M2yDMOV"
+        done_value: 1
+        stop_pv: "6idaSoft:allstop"
+        stop_value: 1
+    y_avg:
+      factory:
+        function: "id6_b.devices.pv_positioner.pvpositioner_factory"
+        readback_pv: "6idaSoft:M2yt2.D"
+        setpoint_pv: "6idaSoft:M2yavg"
+        done_pv: "6idaSoft:M2yDMOV"
+        done_value: 1
+        stop_pv: "6idaSoft:allstop"
+        stop_value: 1
+    y_down:
+      factory:
+        function: "id6_b.devices.pv_positioner.pvpositioner_factory"
+        readback_pv: "6idaSoft:M2yt2.A"
+        setpoint_pv: "6idaSoft:M2ydn"
+        done_pv: "6idaSoft:M2yDMOV"
+        done_value: 1
+        stop_pv: "6idaSoft:allstop"
+        stop_value: 1
+    y_up:
+      factory:
+        function: "id6_b.devices.pv_positioner.pvpositioner_factory"
+        readback_pv: "6idaSoft:M2yt2.B"
+        setpoint_pv: "6idaSoft:M2yup"
+        done_pv: "6idaSoft:M2yDMOV"
+        done_value: 1
+        stop_pv: "6idaSoft:allstop"
+        stop_value: 1
+    x_angle:
+      factory:
+        function: "id6_b.devices.pv_positioner.pvpositioner_factory"
+        readback_pv: "6idaSoft:M2xt2.C"
+        setpoint_pv: "6idaSoft:M2xangl"
+        done_pv: "6idaSoft:M2xDMOV"
+        done_value: 1
+        stop_pv: "6idaSoft:allstop"
+        stop_value: 1
+    x_avg:
+      factory:
+        function: "id6_b.devices.pv_positioner.pvpositioner_factory"
+        readback_pv: "6idaSoft:M2xt2.D"
+        setpoint_pv: "6idaSoft:M2xavg"
+        done_pv: "6idaSoft:M2xDMOV"
+        done_value: 1
+        stop_pv: "6idaSoft:allstop"
+        stop_value: 1
+    x_down:
+      factory:
+        function: "id6_b.devices.pv_positioner.pvpositioner_factory"
+        readback_pv: "6idaSoft:M2xt2.A"
+        setpoint_pv: "6idaSoft:M2xdn"
+        done_pv: "6idaSoft:M2xDMOV"
+        done_value: 1
+        stop_pv: "6idaSoft:allstop"
+        stop_value: 1
+    x_up:
+      factory:
+        function: "id6_b.devices.pv_positioner.pvpositioner_factory"
+        readback_pv: "6idaSoft:M2xt2.B"
+        setpoint_pv: "6idaSoft:M2xup"
+        done_pv: "6idaSoft:M2xDMOV"
         done_value: 1
         stop_pv: "6idaSoft:allstop"
         stop_value: 1
