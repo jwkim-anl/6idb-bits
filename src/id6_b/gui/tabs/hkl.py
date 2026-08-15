@@ -17,6 +17,7 @@ import time
 from qtpy.QtCore import Qt
 from qtpy.QtCore import QTimer
 from qtpy.QtWidgets import QAbstractItemView
+from qtpy.QtWidgets import QCheckBox
 from qtpy.QtWidgets import QComboBox
 from qtpy.QtWidgets import QDoubleSpinBox
 from qtpy.QtWidgets import QFormLayout
@@ -102,6 +103,13 @@ class HklTab(BaseTab):
         self._reference_timer.setSingleShot(True)
         self._reference_timer.setInterval(400)
         self._reference_timer.timeout.connect(self._apply_reference)
+
+        # Same treatment for the fixed-angle boxes: one write once the user
+        # has stopped editing, rather than one per keystroke or per tick.
+        self._presets_timer = QTimer(self)
+        self._presets_timer.setSingleShot(True)
+        self._presets_timer.setInterval(400)
+        self._presets_timer.timeout.connect(self._apply_presets)
 
         # Move progress.  The kernel's shell channel is blocked for the whole
         # move, so progress cannot be polled through it -- the readbacks are
@@ -236,9 +244,71 @@ class HklTab(BaseTab):
         form.addRow("Mode:", self._mode_combo)
         self._constant_label = value_label()
         form.addRow("Constant axes:", self._constant_label)
+
+        # One row per axis the mode holds constant, rebuilt when the mode
+        # changes.  Ticked means "solve for this hkl with the axis at *this*
+        # angle"; unticked means "use whatever the motor currently reads".
+        self._preset_host = QWidget()
+        self._preset_grid = QGridLayout(self._preset_host)
+        self._preset_grid.setContentsMargins(0, 0, 0, 0)
+        self._preset_rows = {}
+        self._preset_axes = []
+        form.addRow("Fixed angles:", self._preset_host)
+        caption = QLabel(
+            "Ticked axes are held at the value shown when solving; unticked "
+            "axes follow the motor.  Presets change the calculation only — "
+            "nothing moves."
+        )
+        caption.setWordWrap(True)
+        form.addRow("", caption)
+
         self._presets_label = value_label()
-        form.addRow("Presets:", self._presets_label)
+        form.addRow("In effect:", self._presets_label)
         return box
+
+    def _rebuild_preset_rows(self, axes):
+        """Build one Fix checkbox + angle box per constant axis of the mode.
+
+        Only rebuilt when the axis list itself changes: the values are
+        refreshed on every state read, and tearing the widgets down each time
+        would pull the box out from under whoever is typing in it.
+        """
+        axes = list(axes or [])
+        if axes == self._preset_axes:
+            return
+        self._preset_axes = axes
+
+        for check, spin, unit in self._preset_rows.values():
+            for widget in (check, spin, unit):
+                # setParent(None) as well as deleteLater(): a deferred delete
+                # is not processed until the event loop comes round, and until
+                # then the old widget still paints over its former cell.
+                self._preset_grid.removeWidget(widget)
+                widget.setParent(None)
+                widget.deleteLater()
+        self._preset_rows = {}
+
+        if not axes:
+            return
+        for row, axis in enumerate(axes):
+            check = QCheckBox(axis)
+            check.toggled.connect(self._on_preset_changed)
+            spin = _spin(-360.0, 360.0, 0.0, decimals=4)
+            spin.valueChanged.connect(self._on_preset_changed)
+            unit = QLabel("deg")
+            self._preset_grid.addWidget(check, row, 0)
+            self._preset_grid.addWidget(spin, row, 1)
+            self._preset_grid.addWidget(unit, row, 2)
+            self._preset_rows[axis] = (check, spin, unit)
+        self._preset_grid.setColumnStretch(3, 1)
+
+    def _preset_values(self):
+        """Return ``{axis: angle}`` for the ticked axes only."""
+        return {
+            axis: spin.value()
+            for axis, (check, spin, _unit) in self._preset_rows.items()
+            if check.isChecked()
+        }
 
     def _build_current_group(self):
         box = QGroupBox("Current position")
@@ -389,12 +459,18 @@ class HklTab(BaseTab):
             index = self._mode_combo.findText(state.get("mode") or "")
             if index >= 0:
                 self._mode_combo.setCurrentIndex(index)
-            self._constant_label.setText(
-                ", ".join(state.get("constant_axes") or []) or PLACEHOLDER
-            )
+            constant_axes = state.get("constant_axes") or []
+            self._constant_label.setText(", ".join(constant_axes) or PLACEHOLDER)
             presets = state.get("presets") or {}
+            self._rebuild_preset_rows(constant_axes)
+            for axis, (check, spin, _unit) in self._preset_rows.items():
+                value = presets.get(axis)
+                check.setChecked(value is not None)
+                if value is not None:
+                    spin.setValue(value)
             self._presets_label.setText(
-                ", ".join(f"{k}={v:g}" for k, v in presets.items()) or PLACEHOLDER
+                ", ".join(f"{k}={v:g}" for k, v in presets.items())
+                or ("none — every constant axis follows its motor")
             )
 
             reference = state.get("psi_reference") or {}
@@ -500,6 +576,7 @@ class HklTab(BaseTab):
             self._sample_combo,
             self._reflection_table,
             *self._ref_boxes.values(),
+            *(w for row in self._preset_rows.values() for w in row[:2]),
         ):
             widget.setEnabled(editable)
         # Move only after a successful calculation, so the confirmation can
@@ -624,6 +701,18 @@ class HklTab(BaseTab):
             f"{pseudos!r}, {reals!r})"
         )
 
+    def _on_preset_changed(self, _value):
+        """Queue a fixed-angle write after the user stops editing."""
+        if self._loading or not self._state:
+            return
+        self._presets_timer.start()
+
+    def _apply_presets(self):
+        """Write the fixed angles (fired by the debounce timer)."""
+        if not self._state:
+            return
+        self._act(f"_gui_hkl_set_presets({self.device!r}, {self._preset_values()!r})")
+
     def _on_reference_changed(self, _value):
         """Queue a psi-reference write after the user stops editing."""
         if self._loading or not self._state:
@@ -645,10 +734,14 @@ class HklTab(BaseTab):
         k = self._calc_boxes["k"].value()
         pos_l = self._calc_boxes["l"].value()
         psi = self._psi_box.value() if self._psi_box.isEnabled() else None
+        # The fixed angles go with the request rather than being left to the
+        # debounce timer, so Calculate pressed straight after typing cannot
+        # solve against the previous value.
         self.request(
             {
                 CALC_KEY: (
-                    f"_gui_hkl_calc({self.device!r}, {h!r}, {k!r}, {pos_l!r}, {psi!r})"
+                    f"_gui_hkl_calc({self.device!r}, {h!r}, {k!r}, {pos_l!r}, "
+                    f"{psi!r}, {self._preset_values()!r})"
                 )
             }
         )
@@ -662,11 +755,19 @@ class HklTab(BaseTab):
         pos_l = self._calc_boxes["l"].value()
         angles = "\n".join(f"    {k2} = {v:.4f}" for k2, v in self._calculated.items())
         warning = "REAL MOTORS WILL MOVE.\n\n" if self.device == "psic" else ""
+        # A fixed angle decides which of many solutions this is, so it belongs
+        # in the box that asks whether to go there.
+        fixed = self._preset_values()
+        fixed_text = (
+            "\nFixed: " + ", ".join(f"{a}={v:g}" for a, v in fixed.items()) + "\n"
+            if fixed
+            else ""
+        )
         answer = QMessageBox.question(
             self,
             "Move diffractometer",
             f"{warning}Move {self.device} to\n\n"
-            f"    H K L = {h:g} {k:g} {pos_l:g}\n\n{angles}\n\n"
+            f"    H K L = {h:g} {k:g} {pos_l:g}\n{fixed_text}\n{angles}\n\n"
             "The command runs in the console and can be interrupted there.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,

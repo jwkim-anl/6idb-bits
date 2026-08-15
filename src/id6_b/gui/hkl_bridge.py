@@ -305,12 +305,61 @@ def _gui_hkl_compute_ub(name):
         return f"Could not compute UB: {exc}"
 
 
+def _gui_hkl_presets_text(dev):
+    """Render the current mode's presets the way the tab shows them."""
+    try:
+        items = dict(dev.core.presets)
+    except Exception:
+        return "unavailable"
+    return ", ".join(f"{k}={v:g}" for k, v in items.items()) or "none"
+
+
+def _gui_hkl_set_presets(name, values):
+    """Fix (preset) the angles the current mode holds constant.
+
+    ``values`` is ``{axis: number}``; an axis left out has no preset, so
+    ``forward()`` falls back to that motor's live position.  Presets change
+    *computed* solutions only -- nothing moves.
+
+    hklpy2's ``presets`` setter silently drops any axis that is not constant
+    in the current mode, so the names it would have dropped are checked here
+    and reported back rather than disappearing without a word.
+    """
+    dev = _gui_hkl_dev(name)
+    try:
+        constant = list(dev.core.constant_axis_names)
+    except Exception as exc:
+        return f"Could not read the constant axes: {exc}"
+    try:
+        wanted = {k: float(v) for k, v in (values or {}).items()}
+    except Exception as exc:
+        return f"Fixed angles must be numbers: {exc}"
+    ignored = [k for k in wanted if k not in constant]
+    try:
+        dev.core.presets = {k: v for k, v in wanted.items() if k in constant}
+    except Exception as exc:
+        return f"Could not set the fixed angles: {exc}"
+    message = f"Fixed angles ({dev.core.mode}): {_gui_hkl_presets_text(dev)}"
+    if ignored:
+        message += (
+            " -- ignored " + ", ".join(sorted(ignored))
+            + ", not held constant in this mode"
+        )
+    return message
+
+
 def _gui_hkl_set_mode(name, mode):
     """Set the mode and freeze the unused detector angle.
 
     The preset logic follows ``hkl_utils_pete.setmode``: a 'vertical' mode
     holds the horizontal detector (solver 'gamma') at 0 and vice versa,
     translated from solver axis names to this diffractometer's own.
+
+    The detector angle is only defaulted when it has no preset yet.  hklpy2
+    keeps presets *per mode* and restores them when a mode is re-selected, so
+    assigning a fresh dict here would throw away an angle the user had fixed
+    in this mode earlier -- re-picking the mode in the tab would silently undo
+    their setting.
     """
     dev = _gui_hkl_dev(name)
     try:
@@ -325,18 +374,17 @@ def _gui_hkl_set_mode(name, mode):
         solver_det = "delta"
 
     try:
-        if solver_det is None:
-            dev.core.presets = {}
-            return f"Mode: {mode}"
-        mapping = dict(
-            zip(dev.core.solver_real_axis_names, list(dev.real_positioners._fields))
-        )
-        axis = mapping.get(solver_det)
-        if axis is None:
-            dev.core.presets = {}
-            return f"Mode: {mode}"
-        dev.core.presets = {axis: 0}
-        return f"Mode: {mode} (preset {axis}=0)"
+        axis = None
+        if solver_det is not None:
+            mapping = dict(
+                zip(dev.core.solver_real_axis_names, list(dev.real_positioners._fields))
+            )
+            axis = mapping.get(solver_det)
+        presets = dict(dev.core.presets)
+        if axis is not None and axis not in presets:
+            presets[axis] = 0
+            dev.core.presets = presets
+        return f"Mode: {mode} (fixed: {_gui_hkl_presets_text(dev)})"
     except Exception as exc:
         return f"Mode set to {mode}, but presets failed: {exc}"
 
@@ -384,10 +432,26 @@ def _gui_hkl_set_psi(name, psi):
         return f"Could not fix psi: {exc}"
 
 
-def _gui_hkl_calc(name, h, k, l, psi=None):
-    """Compute real angles for an hkl, optionally fixing psi first."""
+def _gui_hkl_calc(name, h, k, l, psi=None, presets=None):
+    """Compute real angles for an hkl, optionally fixing psi and angles first.
+
+    ``presets`` is re-sent with every calculation rather than relied upon from
+    an earlier write: the tab applies fixed angles on a debounce timer, so
+    pressing Calculate straight after typing could otherwise solve against the
+    previous value.
+    """
     dev = _gui_hkl_dev(name)
     out = {"device": name, "h": h, "k": k, "l": l}
+    if presets is not None:
+        try:
+            constant = list(dev.core.constant_axis_names)
+            dev.core.presets = {
+                _k: float(_v) for _k, _v in presets.items() if _k in constant
+            }
+            out["presets"] = {_k: _gui_hkl_f(_v) for _k, _v in dev.core.presets.items()}
+        except Exception as exc:
+            out["error"] = f"Could not fix the angles: {exc}"
+            return out
     if psi is not None and "psi_constant" in dev.core.mode:
         try:
             dev.core.extras = {"psi": float(psi)}
