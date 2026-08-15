@@ -39,7 +39,11 @@ from .tabs.hkl import HklTab
 from .tabs.macro import MacroTab
 from .tabs.scan import ScanTab
 from .tabs.scanplot import ScanPlotTab
+from .tabs.status import DEFAULT_LOG_NAME
+from .tabs.status import LOG_ENABLED_KEY
+from .tabs.status import LOG_PATH_KEY
 from .tabs.status import StatusTab
+from .transcript import ConsoleTranscript
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +118,14 @@ class MainWindow(QMainWindow):
         self.docstream.document.connect(self._on_document)
         self.docstream.start()
 
+        # Appends the console's traffic to a file.  Built before the poller, so
+        # the very first drain of iopub -- which already holds everything the
+        # bootstrap has printed -- has somewhere to go.
+        self.transcript = ConsoleTranscript()
+        self._resume_transcript(cwd)
+
         self.poller = StatusPoller(self.session, parent=self)
+        self.poller.iopub_message.connect(self.transcript.handle)
         # Lets a tab request an occasional one-off expression, and run code
         # visibly in the console for anything with real consequence (see
         # BaseTab).
@@ -122,6 +133,12 @@ class MainWindow(QMainWindow):
             tab.poller = self.poller
             tab.console_execute = self.console.execute
             tab.session_cwd = cwd
+            tab.transcript = self.transcript
+            # The Session tab owns the log controls, and has to be told once
+            # the transcript exists -- by then it may already be running.
+            sync = getattr(tab, "sync_transcript", None)
+            if sync is not None:
+                sync()
         self.poller.metadata_changed.connect(self._on_metadata)
         self.poller.kernel_values_changed.connect(self._on_kernel_values)
         self.poller.kernel_state_changed.connect(self._on_kernel_state)
@@ -131,6 +148,24 @@ class MainWindow(QMainWindow):
         # bootstrap from _do_restart() via the same ready handshake.
         self.session.ready.connect(self._on_kernel_ready)
         self.session.wait_until_ready()
+
+
+    def _resume_transcript(self, cwd):
+        """Restart console logging where the last session left it.
+
+        Without this the ~40 s device-loading log -- the part of a session
+        nobody is watching and everybody wants afterwards -- would only ever be
+        captured by someone who pressed Start within seconds of launching.  A
+        failed start is left to the Session tab to report; it must not stop the
+        window from opening.
+        """
+        settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
+        if not settings.value(LOG_ENABLED_KEY, False, type=bool):
+            return
+        path = settings.value(LOG_PATH_KEY, "", type=str)
+        if not path:
+            path = os.path.join(cwd, DEFAULT_LOG_NAME)
+        self.transcript.start(path)
 
     def _on_kernel_ready(self):
         """Bootstrap Bluesky and begin polling, once the kernel can answer."""
@@ -320,6 +355,9 @@ class MainWindow(QMainWindow):
         """
         self.poller.stop()
         self.poller.reset()
+        # The console is about to be wiped; the log is not, so leave a marker
+        # explaining why the transcript jumps back to In [1].
+        self.transcript.note("kernel restarted")
         self.session.restart()
         # Autorestart is off, so qtconsole does not clear the console for us.
         self.console.reset(clear=True)
@@ -340,6 +378,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):  # noqa: N802 - Qt naming
         """Stop polling and shut the kernel down so none is left orphaned."""
         self.poller.stop()
+        self.transcript.stop()
         self.docstream.stop()
         for tab in self._tab_widgets:
             shutdown = getattr(getattr(tab, "model3d", None), "shutdown", None)

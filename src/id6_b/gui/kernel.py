@@ -25,6 +25,7 @@ import ast
 import logging
 import queue
 import time
+from collections import deque
 from pathlib import Path
 
 import yaml
@@ -342,6 +343,12 @@ MD_FILENAME = ".re_md_dict.yml"
 
 POLL_INTERVAL_MS = 1000
 
+#: How many of the poller's own request ids to remember, so their iopub echoes
+#: can be told apart from the session's traffic.  One request goes out every
+#: :data:`POLL_INTERVAL_MS`, so only the most recent few can still have replies
+#: in flight; the rest is slack for ``execute_once`` bursts.
+OWN_REQUEST_MEMORY = 64
+
 #: Evaluated in the kernel when it is idle.  Each entry reports its own
 #: ``status``, so one failing expression never blanks the others --
 #: ``experiment.experiment_path`` raises until ``experiment_setup()`` has run,
@@ -547,6 +554,12 @@ class StatusPoller(QObject):
     kernel_values_changed = Signal(dict)
     kernel_state_changed = Signal(str)
 
+    #: One broadcast iopub message, everything the console renders included.
+    #: Messages the poller itself provoked are filtered out first, so a
+    #: subscriber sees the session and not the GUI's own housekeeping.  Used by
+    #: the console transcript; see :mod:`id6_b.gui.transcript`.
+    iopub_message = Signal(dict)
+
     def __init__(self, session, parent=None):
         """Poll state for *session*, a started :class:`KernelSession`."""
         super().__init__(parent)
@@ -557,6 +570,9 @@ class StatusPoller(QObject):
         self._state = None
         self._pending = None
         self._once = {}
+        # msg_ids of requests this poller sent.  Bounded because one goes out
+        # every second: only the most recent can still have replies in flight.
+        self._own_requests = deque(maxlen=OWN_REQUEST_MEMORY)
 
         self._timer = QTimer(self)
         self._timer.setInterval(POLL_INTERVAL_MS)
@@ -589,10 +605,17 @@ class StatusPoller(QObject):
         self._emit_state()
 
     def _drain_iopub(self):
-        """Consume broadcast messages to track kernel busy/idle.
+        """Consume broadcast messages to track kernel busy/idle, and re-emit.
 
         iopub is broadcast to every client, so this sees execution driven from
-        the console even though it runs on the poll client.
+        the console even though it runs on the poll client -- which is what
+        makes it the capture point for the console transcript.  Anything this
+        poller provoked itself is dropped first: :meth:`_poll_kernel` has to
+        send ``silent=False`` (or ``user_expressions`` are ignored), so the
+        kernel broadcasts an ``execute_input`` for an empty cell once a second,
+        and a subscriber must not see it.  The bootstrap is deliberately *not*
+        filtered -- it goes out on the console's client, and its device-loading
+        log is worth keeping.
         """
         client = self._session.poll_client
         if client is None:
@@ -608,6 +631,10 @@ class StatusPoller(QObject):
                 state = msg.get("content", {}).get("execution_state")
                 if state in ("busy", "idle"):
                     self._busy = state == "busy"
+            parent = (msg.get("parent_header") or {}).get("msg_id")
+            if parent in self._own_requests:
+                continue
+            self.iopub_message.emit(msg)
 
     def _read_metadata_file(self):
         """Re-read the RunEngine metadata file when it changes on disk."""
@@ -637,10 +664,16 @@ class StatusPoller(QObject):
         if client is None:
             return False
         try:
-            client.execute(code, silent=True, store_history=False, allow_stdin=False)
+            msg_id = client.execute(
+                code, silent=True, store_history=False, allow_stdin=False
+            )
         except Exception:  # noqa: BLE001 - caller decides how to report
             logger.exception("Could not execute %r in the kernel.", code[:80])
             return False
+        # Silent, so there is no execute_input to hide -- but a failing
+        # statement still broadcasts an `error`, and a GUI-internal traceback
+        # has no place in the console transcript.
+        self._own_requests.append(msg_id)
         return True
 
     def request_once(self, expressions):
@@ -680,6 +713,7 @@ class StatusPoller(QObject):
         except Exception:  # noqa: BLE001 - kernel may be restarting
             self._pending = None
         else:
+            self._own_requests.append(self._pending)
             self._once.clear()
 
     def _collect_reply(self, client):
