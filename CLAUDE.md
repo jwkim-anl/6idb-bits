@@ -573,12 +573,19 @@ def align():
   from `_gui_hkl_state()` and h2/k2/l2 from the tab's ψ reference boxes, so
   there is one source of truth.
 
-  **Requires `vtk`, `pyvista`, `pyvistaqt`** (plus `pooch`, `scooby`), which are
-  *not* in the environment by default. `vtk`/`pyvista` are imported lazily and
-  `diffract3d.AVAILABLE` gates the panel, so the GUI runs normally without them
-  and the panel shows the install command instead. The pure-maths half
-  (`Rx/Ry/Rz`, `rot_about4`, `rotation_to_align`, `Diffractometer.chain_matrix`)
-  has no VTK dependency and is unit-testable without the packages.
+  **Requires `vtk`, `pyvista`, `pyvistaqt`** (plus `pooch`, `scooby`) — the
+  `gui3d` extra in `pyproject.toml`, not part of a plain install.
+  `vtk`/`pyvista` are imported lazily and `diffract3d.AVAILABLE` gates the
+  panel, so the GUI runs normally without them and the panel shows the install
+  command instead. The pure-maths half (`Rx/Ry/Rz`, `rot_about4`,
+  `rotation_to_align`, `Diffractometer.chain_matrix`) has no VTK dependency and
+  is unit-testable without the packages. They **are** installed in the
+  `6idb-bits` env, so `Diffract3DPanel` opens an X render window as soon as
+  `HklTab` is constructed: a headless (`QT_QPA_PLATFORM=offscreen`) test of the
+  tab has to monkeypatch `tabs.hkl.Diffract3DPanel` to a plain `QWidget` stub or
+  VTK aborts the process. Such a test must also `import hklpy2` **before** Qt —
+  Qt first leaves `gi` with an undefined symbol against the wrong
+  `libgobject`, the same clash that keeps the GUI's kernel Qt-free.
 - **`hkl_bridge.py` + `tabs/hkl.py`** — `HklTab`: samples and lattices,
   reflection table (editable h/k/l and angles) with first/second orienting
   selection, Compute UB, mode selection, live current-position readout
