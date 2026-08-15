@@ -300,6 +300,28 @@ bootstrap in a Jupyter kernel, so the plain IPython workflow is untouched.
   which is also why it is appended to the same cell. The prompt is live while
   this runs, where `execute()` used to block it, so a one-line notice says that
   anything typed before startup finishes will run afterwards.
+
+  `HELPERS_CODE` also installs the `_gui_*` helpers the tabs poll for. Two serve
+  the peak buttons: `_gui_scan_options()` returns an `axis_fields` map of
+  *hinted field* → *dotted path* alongside the axis list it already built (a
+  hinted field is not a device name, so the Scan plot tab cannot turn
+  `sim_motor` into something `mv()` accepts without it), and
+  `_gui_peak_fields()` returns the last run's hinted scalar detectors as
+  suggestions for the Macro tab. The latter goes through
+  `center_maximum._hinted_detectors(cat[-1])`, **not** `bec.peaks`, so the
+  suggestions are exactly what `cen()` will accept and do not depend on BEC's
+  asynchronous fill.
+
+  `start()` also **advertises the kernel**: `_write_pointer()` drops
+  `.id6b-gui-kernel.json` (`connection_file`, `pid`, start time, cwd) into the
+  kernel's cwd, and `shutdown()` removes it. That is how the MCP server finds
+  the session without being configured — see `mcp_server/` below. A failure to
+  write it is logged and leaves `pointer_path = None`; the GUI runs regardless.
+  `bootstrap()` sends two more helper strings in the same cell as the other
+  three — `MCP_HELPERS_CODE` and `MOTION_HELPERS_CODE` — and
+  `KERNEL_EXPRESSIONS` carries `"mcp_pending": "_gui_mcp_pending_info()"`, so
+  the Agent tab arrives on the existing 1 Hz poll with no new reader on the
+  shell channel.
 - **`docstream.py`** — live-plot plumbing. The kernel publishes documents over
   ZMQ (`Publisher`) into a `Proxy` + `RemoteDispatcher` running in daemon
   threads *in the GUI process*, which re-emits them as a Qt signal on the main
@@ -373,6 +395,58 @@ bootstrap in a Jupyter kernel, so the plain IPython workflow is untouched.
   mid-scan created a second `imshow` *and* a second colourbar; it rebuilds in
   place instead. (The colourbar lives in its own axes, so `axes.clear()` does
   not remove it.)
+
+  **A peak row under the plot**, in two lines:
+
+  ```
+  Peak of [field v]  cen …  com …  max …  min …  fwhm …
+  [x] Markers  [Go to cen] [Go to com] [Go to max] [Go to min]
+  ```
+
+  It moves the scanned axis onto the peak after a scan. `cen` is the
+  half-maximum midpoint — what BEC prints, so the button and the console can
+  never disagree. `fwhm` is shown for reference and gets no button (it is a
+  width, not a position). The statistics come from
+  `peak_statistics(self._x_data, self._values(series))` — **the same arrays the
+  canvas draws**, so the Mon selection is inherited for free: with a monitor
+  chosen the peak is that of `It/I0`, matching what is on screen, and nothing
+  extra is fetched from the kernel.
+
+  Two lines rather than one because a `QHBoxLayout` does not wrap — at the
+  default 1100 px window the five statistics at `%.10g` plus four buttons
+  overflowed and Qt *clipped* the label, silently eating `min` and `fwhm`. For
+  the same reason the buttons carry no value in their text; the number is in the
+  peak row and the exact `RE(mv(…))` is in the tooltip.
+
+  **Dotted vertical markers.** `MARKER_STYLES` pairs each of `cen`/`com`/`max`/
+  `min` with a colour; `_draw_markers()` puts an `axvline` at each in that
+  colour, and the same colour is used for the statistic's name in the peak row
+  and for its button — that triple is how a line is identified. Deliberately
+  **not** through the matplotlib legend, which belongs to the curves:
+  `_rescale()` builds the legend only from `self._series` lines and removes it
+  below two curves, so labelled markers would come and go with the curve count.
+  Hence `label="_nolegend_"`. The colours are picked away from the default curve
+  cycle and the markers are dotted where curves are solid, so a marker still
+  reads as a marker if a curve lands on the same hue. The **Markers** check box
+  toggles all four.
+
+  Markers are updated from `_update_peak()` only — never per event — so they
+  settle when the scan stops, or when the curve, the monitor or the toggle
+  changes, rather than jittering through the scan. `_remove_marker()` wraps
+  `line.remove()` in `except (ValueError, NotImplementedError)`: an
+  `axes.clear()` may already have destroyed the artist.
+
+  A button emits a **literal** `RE(mv(sim_motor, 1.023426152))` through
+  `run_in_console()`, not `RE(cen())`: the value is already on screen, it needs
+  no catalog lookup, and it reads back in the history as a plain move. (The
+  Macro tab's equivalent must emit the *plan* instead — see `tabs/macro.py`.)
+  The dotted path comes from `axis_fields` in `_gui_scan_options()`; an
+  unresolvable field disables the buttons and says which one. The row is
+  **hidden** when there is no real x axis — a `count()` (`_use_elapsed_time`) or
+  a grid scan — and the buttons are disabled while the scan is running or the
+  kernel is busy, each with the reason in the tooltip. A statistic can be `None`
+  (`cen` has no half-maximum crossing on a flat trace); that one gets no marker
+  and its button alone is disabled, while the others still work.
 - **`tabs/scan.py`** — `ScanTab`: pick a plan (`count`, `ascan`, `lup`,
   `grid_scan`, `rel_grid_scan`), detectors, axes, points and time per
   point, and press Scan. The form encodes the argument-order difference between
