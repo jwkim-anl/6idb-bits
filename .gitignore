@@ -179,3 +179,6 @@ qserver/existing_plans_and_devices.yaml
 
 # Local Run Engine metadata dictionary
 .re_md_dict.yml
+
+# Kernel advertisement written by the GUI, read by the MCP server
+.id6b-gui-kernel.json
