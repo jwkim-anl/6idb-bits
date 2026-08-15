@@ -111,7 +111,7 @@ The `sl1`–`sl3` entries show the per-axis `class:` hook of `mb_creator`: the f
 
 ### Key configuration files (`src/id6_b/configs/`)
 
-- **`iconfig.yml`** — master instrument config: databroker catalog name (`6idb`), metadata defaults, SPEC/NeXus enable flags, BEC settings, DM_SETUP_FILE path. Contains `AREA_DETECTOR: HDF5_FILE_TEMPLATE: "%s/%s_%05d"` used by `local_scans` to build per-scan output file paths.
+- **`iconfig.yml`** — master instrument config: databroker catalog name (`6idb`), metadata defaults, SPEC/NeXus enable flags, BEC settings, DM_SETUP_FILE path. Contains `AREA_DETECTOR: HDF5_FILE_TEMPLATE: "%s/%s_%05d"` used by `local_scans` to build per-scan output file paths. Also `GUI: AUTO_SETUP:`, the session defaults the GUI applies at startup — see `gui/session_setup.py`.
 - **`devices.yml`** — active device definitions (Guarneri YAML). The `hklpy2.creator` entries for real diffractometers (`psic`, `psic_psi`, `psic_q`) use a `beam_kwargs` key to configure `EpicsMonochromatorRO` as the beam source — this is the native hklpy2 way to link the HKL solver wavelength to EPICS monochromator PVs:
   ```yaml
   beam_kwargs:
@@ -322,6 +322,32 @@ bootstrap in a Jupyter kernel, so the plain IPython workflow is untouched.
   `KERNEL_EXPRESSIONS` carries `"mcp_pending": "_gui_mcp_pending_info()"`, so
   the Agent tab arrives on the existing 1 Hz poll with no new reader on the
   shell channel.
+- **`session_setup.py`** — `SESSION_SETUP_CODE`, the last string appended to the
+  bootstrap cell. `experiment_setup()` and `counters()` have to be answered
+  before the first scan of every session and the answers are nearly always the
+  same, so it applies them from `iconfig.yml`'s `GUI: AUTO_SETUP:` block:
+  `EXPERIMENT` (base path, sample, file base name — an empty `BASE_PATH` means
+  the directory the GUI was started in) and `COUNTERS` (detector channels and
+  monitor). **GUI only** — the plain IPython workflow and the queue server never
+  see this module and still prompt.
+
+  `COUNTERS` takes **either channel names or the row indices** `counters()`
+  prints. Names are the documented preference: a renamed channel fails loudly
+  and lists what is available, while a row index that has shifted — one more
+  scaler channel, `lambda250k` absent — would quietly select the *wrong*
+  detector. The rows are resolved and checked here rather than passed straight
+  through, because `plotselect()` falls back to `input()` on a bad argument and
+  stdin is closed in this kernel, so an invalid index would hang the tail of the
+  bootstrap instead of reporting itself.
+
+  Read kernel-side (`iconfig` is already in the namespace after
+  `from id6_b.startup import *`), so the GUI process neither finds nor parses
+  the file a second time. `_gui_auto_setup()` cannot raise: this runs at the
+  tail of the bootstrap cell, and a session that is merely un-configured must
+  not look like one that failed to start. It is appended **after**
+  *follow_up_code* so a bad block cannot cost the live-plot subscription, and so
+  its summary is what the console is left showing once the ~40 s device-loading
+  log has scrolled past.
 - **`docstream.py`** — live-plot plumbing. The kernel publishes documents over
   ZMQ (`Publisher`) into a `Proxy` + `RemoteDispatcher` running in daemon
   threads *in the GUI process*, which re-emits them as a Qt signal on the main

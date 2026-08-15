@@ -75,6 +75,30 @@ OPHYD:
 
 XMODE_DEBUG_LEVEL: Plain
 
+### Session defaults applied automatically when the Qt GUI (`id6b-gui`) starts,
+### so a session opens ready to scan.  Only the GUI reads this -- the plain
+### IPython workflow and the queue server still prompt.
+GUI:
+    AUTO_SETUP:
+        ENABLE: true
+
+        ### Passed to experiment_setup().  An empty BASE_PATH means the
+        ### directory the GUI was started in.
+        EXPERIMENT:
+            BASE_PATH: ""
+            SAMPLE: test
+            FILE_BASE_NAME: scan
+
+        ### Passed to counters.plotselect().  Either the channel names printed
+        ### by counters(), or the row indices from that table.  Prefer names: a
+        ### renamed channel fails loudly and says so, while a row index that
+        ### has shifted would quietly select the wrong detector.
+        COUNTERS:
+            DETECTORS:
+                - Ion Chamber 4       # scaler,     row 4
+                - Stats1              # lambda250k, row 8
+            MONITOR: Time             # row 0
+
 ### Area detector output file path template.
 ### Used by local_scans to build per-scan NeXus master and detector HDF5 paths.
 ### Arguments: base_path, file_base_name, scan_id

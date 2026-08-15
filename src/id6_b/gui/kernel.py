@@ -41,6 +41,7 @@ from ..mcp_server.bridge import MCP_HELPERS_CODE
 from ..mcp_server.motion import MOTION_HELPERS_CODE
 from ..mcp_server.session import POINTER_NAME
 from .hkl_bridge import HKL_HELPERS_CODE
+from .session_setup import SESSION_SETUP_CODE
 
 logger = logging.getLogger(__name__)
 
@@ -580,6 +581,12 @@ class KernelSession(QObject):
         ]
         if follow_up_code:
             parts.append(follow_up_code)
+
+        # Last: after the devices exist, and after the live-plot subscription,
+        # so a bad AUTO_SETUP block cannot cost the plotting.  Being last also
+        # leaves the experiment/counters summary on screen once the ~40 s of
+        # device-loading log has scrolled past.
+        parts.append(SESSION_SETUP_CODE)
 
         # The prompt is live while this runs, where ``console.execute()`` used
         # to block it, so say what is happening: a command typed now is queued
