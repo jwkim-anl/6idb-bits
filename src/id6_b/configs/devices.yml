@@ -298,6 +298,15 @@ apstools.devices.mb_creator:
     hsize: "m6"   # SL4_HGap
     vcen: "m7"    # SL4_VCEN
     vsize: "m8"   # SL4_VGap
+# white beam slits in A-station
+- name: wbslit
+  prefix: "6idaSoft:ACS-A1:"
+  labels: ["wbslit", "baseline"]
+  motors:
+    horizontal: "m1"    # white beam slit horizontal
+    diagonal: "m2"   # white beam slit diagonal
+    pitch: "m3"    # white beam slit pitch
+    yaw: "m4"   # white beam slit yaw
 
 # --- Sample environment / table motor bundles ---------------------------
 - name: opty2
