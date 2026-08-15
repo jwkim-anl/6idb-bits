@@ -69,7 +69,7 @@ queue-monitor &                           # GUI client
 6. `RE(make_devices(file="devices_aps_only.yml"))` — only when on APS subnet
 7. Call `default_settings()` on every `oregistry` device that defines one — `make_devices()` does **not** do this. Required for `LocalScalerCH`: without it the unnamed scaler channels keep `Kind.hinted|normal` and their empty EPICS names break the event descriptor. Failures are logged per-device rather than aborting startup. Runs before the baseline stream is built so baseline devices are configured before their first read.
 8. `setup_baseline_stream(sd, oregistry)` — adds devices labeled `"baseline"` to the supplemental data stream
-9. Import `counters` singleton and `local_scans` plans into the session namespace
+9. Import `counters` singleton, `local_scans` plans and the `center_maximum` plans (`cen`, `com`, `maxi`, `mini` and the `*2` aliases) into the session namespace
 
 ### Device configuration (`src/id6_b/configs/devices.yml`)
 
@@ -125,7 +125,9 @@ The `sl1`–`sl3` entries show the per-axis `class:` hook of `mb_creator`: the f
 
 ### Utilities (`src/id6_b/utils/`)
 
-- **`run_engine.py`** — Module-level `RE = None` and `bec = None` placeholders. `startup.py` populates these after `init_RE()`. Plans import the module (not the names) so they see the live values at call time: `from ..utils import run_engine as _re_module; _re_module.RE.md[...]`.
+- **`run_engine.py`** — Module-level `RE`, `bec`, `peaks` and `cat` placeholders, all `None`. `startup.py` populates them after `init_RE()` (`cat` at `startup.py:84`). Plans import the module (not the names) so they see the live values at call time: `from ..utils import run_engine as _re_module; _re_module.RE.md[...]`.
+
+- **`peak_statistics.py`** — pure `peak_statistics(x, y)` → `{"cen", "com", "max", "min", "fwhm"}`. Definitions copied from `bluesky.callbacks.fitting.PeakStats` so the numbers match the `cen` table BEC prints: `max`/`min` are `(x, y)` pairs, `com` is the intensity-weighted mean, `cen` the mean of the interpolated half-maximum crossings, `fwhm` their span. Returns `None` for a statistic that is undefined (fewer than 2 points, all-NaN, a flat curve). NaNs are dropped pairwise first — monitor division produces them wherever the monitor read zero. **No ophyd, Qt or bluesky import at module scope**, deliberately: the GUI process and the kernel both import it, which is what keeps the Scan plot buttons and the `cen()` plan from drifting apart.
 
 - **`counters_class.py`** — `CountersClass` + singleton `counters`. Holds the detector list and monitor channel for scan plans. Looks up devices from `oregistry` lazily (safe to import before devices are created). `IDEAL_ORDER = ["scaler", "lambda250k"]` controls detector priority; add new detector names there as hardware is added. For a detector to appear in `counters()` it must implement `plot_options` (list of channel name strings) and `select_plot(channels)` (sets `Kind.hinted`). Adding `plot_signals` (name → signal) is optional but makes the detector's channels appear in the GUI's Detectors tab for `Kind` editing. Usage:
 
@@ -166,6 +168,21 @@ RE(grid_scan(sample_y, -1, 1, 11, sample_x, -1, 1, 11, 1.0))
 RE(ascan(energy, 7.1, 7.15, 51, 1.0, fixq=True))  # hold HKL during energy scan
 ```
 
+- **`center_maximum.py`** — `cen`, `com`, `maxi`, `mini` (plus POLAR's `cen2`/`maxi2`/`mini2` aliases): move one positioner onto a feature of the **last** scan, so the alignment loop is a plan rather than a copy-and-paste of the number BEC printed:
+
+```python
+def align():                                   # one RE() call, so Ctrl-C stops the lot
+    for step in [0.5, 0.05]:
+        yield from lup(sl1.top, -step, step, 41, 1.0)
+        yield from cen()
+```
+
+  Every argument is optional — `cen(positioner=None, detector=None, monitor=None)`. The positioner is inferred from `start["hints"]["dimensions"]` (refusing anything but a single 1D dimension) and the detector from the primary descriptor's hints. **Both inferences raise a named `ValueError` naming the candidates rather than guessing**, so a macro fails loudly at that step instead of moving the wrong motor. Note the scaler hints every *named* channel, so at 6-ID-B a bare `cen()` only works when `counters` has narrowed the selection to one; otherwise pass `detector="Ion Chamber 2"` (real channel names contain spaces). `monitor=` divides by another field first, matching the Scan plot tab's Mon selection.
+
+  **The values come from the catalog, never from `bec.peaks`** — that is a correctness requirement, not a preference. `BestEffortCallback` is a `QtAwareCallback`: under a Qt matplotlib backend it emits each document to the Qt main thread through a queued signal (`bluesky/callbacks/mpl_plotting.py:76`), so BEC's `stop()` — where `peaks` is filled in — runs *after* the plan has already moved on. Inside a macro `peaks` is still empty when `cen()` executes; bisected as `{'det': 0.12…}` under Agg versus `{}` under qtAgg. `cat.v1.insert` is a plain callback, so the run is in the catalog synchronously. Columns are read one at a time with `run.primary.to_dask()[field].compute()`; a bare `primary.read()` would pull back every Lambda 250K image. Descriptors live at `run.primary.metadata["descriptors"]` (**not** `run.primary.descriptors`, which does not exist), and a hinted key with a non-empty `data_keys[k]["shape"]` is an image and is skipped.
+
+  `_resolve_field()` maps a hint field back to a device by walking `oregistry.all_devices`, because a hint field is *not* a device name (`psic.h` reports `psic_h`) and `oregistry.find()`'s positional argument is a fuzzy `any_of` match that raises `MultipleComponentsFound` as often as it succeeds. A field is hinted by the leaf *and* by every container above it, so the device hinting the fewest fields wins, with the longer name breaking ties.
+
 ### Callbacks (`src/id6_b/callbacks/`)
 
 - **`spec_data_file_writer.py`** — SPEC-format data file output (enabled in `iconfig.yml`)
@@ -187,10 +204,12 @@ RE(ascan(energy, 7.1, 7.15, 51, 1.0, fixq=True))  # hold HKL during energy scan
 - `devices/scaler.py` — adapted for single scaler
 - `utils/counters_class.py` — ported with `IDEAL_ORDER = ["scaler", "lambda250k"]`
 - `utils/experiment_utils.py` — simplified (no DM/ESAF/proposal/server); just path + sample + base_name management
-- `utils/run_engine.py` — new module for RE/bec references (populated by `startup.py`)
+- `utils/run_engine.py` — new module for RE/bec/peaks/cat references (populated by `startup.py`)
+- `utils/peak_statistics.py` — new; not in polar_common, which reads BEC's `peaks` directly
 - `callbacks/nexus_data_file_writer.py` — adapted: `MyNXWriter(NXWriterAPS)`, per-scan subscription, ExternalLink support
 - `plans/local_preprocessors.py` — adapted: no dichro/lockin decorators
 - `plans/local_scans.py` — adapted: no dichro/lockin/phase plates/vortex_sgz/qxscan; keeps `fixq`
+- `plans/center_maximum.py` — rewritten rather than ported: the polar_common version reads `bec.peaks`, which is empty mid-plan under a Qt backend, and resolves the positioner with `oregistry.find(<hint field>)`, which is the wrong lookup
 
 **Available in `polar_common/devices/` for future porting:**
 
