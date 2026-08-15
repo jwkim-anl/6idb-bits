@@ -507,7 +507,8 @@ bootstrap in a Jupyter kernel, so the plain IPython workflow is untouched.
   generated `import bluesky.plan_stubs as bps` is there so a saved file also
   works under `%run`.
 
-  Six components — Loop, Set value, Wait, Scan, Print, Code. **Every numeric
+  Seven components — Loop, Set value, Wait, Scan, **Go to peak**, Print, Code.
+  **Every numeric
   field is free text, not a spin box**, which is what lets a loop variable be
   used as a value or a scan limit; validation is "non-empty" and the real check
   is the `compile()` on Load. Loop values are either a literal list or
@@ -533,6 +534,25 @@ bootstrap in a Jupyter kernel, so the plain IPython workflow is untouched.
   top-level `def`, disabled until a successful Load and re-disabled as soon as
   the text changes, so it can only call a definition the session actually has.
   Both need the kernel idle; the editor is always editable.
+
+  **Go to peak** emits `yield from cen()` (or `com`/`maxi`/`mini`), with
+  `axis`, `detector=` and `monitor=` added only when filled in. Here the *plan*
+  has to be emitted, not the literal `mv` the Scan plot buttons produce: a macro
+  is written before the scan it will align on, so the peak position cannot be
+  known at generation time. That is the whole reason `plans/center_maximum.py`
+  has to exist as plans rather than as GUI code. The three combos are editable —
+  the detector list is only a suggestion from the last scan
+  (`_gui_peak_fields()`), because the field a future scan will hint is not known
+  either, and real scaler channel names contain spaces (`Ion Chamber 2`), so
+  they are emitted with `!r`. This is what makes the two-pass alignment loop a
+  single interruptible plan:
+
+```python
+def align():
+    for step in [0.5, 0.05]:
+        yield from lup(sim_motor, -step, step, 41, 1.0)
+        yield from cen()
+```
 
   Set-value targets come from `_gui_macro_targets(name)`, fetched per device on
   demand rather than all at once (~600 names otherwise). It returns positioners
