@@ -261,6 +261,21 @@ bootstrap in a Jupyter kernel, so the plain IPython workflow is untouched.
     `user_expressions` entirely**, and `store_history=False` keeps the console
     prompt number intact. At most one request is in flight, which is what stops
     a burst of queued polls when a long scan ends.
+  `_drain_iopub()` reads the **broadcast** iopub channel — originally only for
+  busy/idle — and re-emits each message as `iopub_message`, which is what feeds
+  the console log (see `transcript.py`). iopub is a broadcast, so the poll
+  client sees everything the console renders even though the console is on a
+  different client. **The poller's own traffic is filtered out first**, by
+  `msg_id`: `_poll_kernel` must send `silent=False` (or `user_expressions` are
+  ignored), so the kernel broadcasts an `execute_input` for an empty cell once a
+  second, and `execute_once` — silent, but able to raise — would put GUI-internal
+  tracebacks in the log. Both record their `msg_id` in a
+  `deque(maxlen=OWN_REQUEST_MEMORY)` and `_drain_iopub` skips any message whose
+  `parent_header.msg_id` is in it. Filtering by `msg_id` rather than by empty
+  code is what also covers `execute_once`, and it deliberately does **not**
+  filter the bootstrap: that goes out on the *console's* client, and its
+  device-loading log is exactly what the transcript is for.
+
   `wait_until_ready()` polls `kernel_info` (non-blocking, via `QTimer`) and
   emits `ready` before anything is executed. **Do not execute before this
   fires:** qtconsole's `_handle_status` treats the kernel's own
@@ -570,9 +585,59 @@ bootstrap in a Jupyter kernel, so the plain IPython workflow is untouched.
   per-device `connected` probe needs a `try`, which `user_expressions` cannot
   express, so it calls `_gui_device_table()` — installed in the kernel by
   `kernel.HELPERS_CODE` as part of the bootstrap cell.
+- **`transcript.py`** — `ConsoleTranscript`, which appends the console's traffic
+  to a plain text file. The console is the record of what was done to the
+  instrument and none of it survives on its own: qtconsole trims its scrollback,
+  Restart clears the pane, and closing the window loses the lot.
+
+  The content comes from **iopub, not from the widget** — `StatusPoller`'s
+  `iopub_message` (above). Taking it there means the file is unaffected by the
+  scrollback limit or by a console clear, and it keeps filling **while a scan is
+  running**. `execute_input` becomes `In [n]: …` (continuations `   ...: `),
+  `stream` goes in verbatim, `execute_result` becomes `Out[n]: …`,
+  `display_data` contributes its `text/plain`, and `error` its traceback;
+  everything else is ignored, so `status`, `clear_output` and comm traffic cost
+  nothing. Deliberately **not** IPython's `%logstart`, which records input and
+  results but not stream output, tracebacks or the device-loading log — most of
+  what is wanted here. (`apsbits`' `logging_setup` already starts one of those,
+  into `<cwd>/.logs/ipython_log.py`; this complements it rather than repeating
+  it.)
+
+  The file is opened `"a"` with `buffering=1`, so `tail -f` follows the session
+  and a `kill -9` loses nothing; ANSI escapes are stripped (IPython colours its
+  tracebacks, and the codes make the file unreadable in an editor). **Append,
+  never truncate** — one file can hold a whole experiment and a mis-click on
+  Start cannot destroy the earlier transcript. Every write is guarded: an
+  `OSError` closes the file and sets `error` rather than raising into the poll
+  timer, which would take the whole status display down with it. The module has
+  **no Qt import**, so it is testable without a `QApplication`.
 - **`tabs/status.py`** — `StatusTab`, the Session/Scan/Files overview. Derives
   RunEngine `running` from kernel-busy, because a running plan holds the shell
   channel and `RE.state` cannot be polled mid-scan.
+
+  The **Console log** group drives the `ConsoleTranscript`: a path field, a
+  `Browse…` (`getSaveFileName` with `DontConfirmOverwrite`, since an existing
+  file is appended to and Qt's "replace it?" prompt would describe something
+  that does not happen), a Start/Stop toggle and a status line. **The path field
+  and Browse are disabled while logging**, so the file cannot be swapped out
+  from under an open handle. The default is `<session_cwd>/console.log` — the
+  kernel's cwd, where the data already goes, not the GUI process's.
+
+  Both the path and the on/off state are remembered in
+  `QSettings("APS", "id6b-gui")`, and `app.py` **auto-resumes** logging in
+  `MainWindow.__init__` before the poller exists. That is what captures the ~40 s
+  device-loading log: `poll_client.start_channels()` runs in `session.start()`,
+  so iopub queues from that moment and the first `_drain_iopub` collects all of
+  it — otherwise only someone who pressed Start within seconds of launching
+  would ever get it. `_do_restart()` writes a `note("kernel restarted")` marker,
+  so a cleared console is still explicable from the file, and `closeEvent()`
+  stops the log for a footer and a clean close.
+
+  The status line has **its own 1 s `QTimer`, running only while logging**. Not
+  `kernel_values_changed`, which stops arriving during a scan — exactly when
+  watching the log grow is worth anything — and not `kernel_state_changed`,
+  which only fires on transitions. The timer also notices a transcript that
+  closed *itself* on a write failure and puts the controls back.
 - **`app.py`** — `MainWindow`, the `TABS` list, and the toolbar. The window is
   a vertical splitter kept at **even halves**. Two things are needed for that:
   each tab is wrapped in a `QScrollArea` unless it sets `scrollable = False`
