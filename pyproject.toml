@@ -55,11 +55,20 @@ dev = [ "build", "isort", "mypy", "pre-commit", "pytest", "ruff",]
 # 3D diffractometer view in the GUI's HKL tab.  Optional: the GUI runs without
 # it and the panel shows an install hint instead.
 gui3d = [ "vtk<9.4.0", "pyvista", "pyvistaqt",]
+# The `id6b-mcp` server, which lets an LLM set up the simulated diffractometer
+# in a running GUI session.  Optional: only server.py imports the SDK, so the
+# GUI and the kernel-side dispatcher work without it.
+mcp = [ "mcp",]
 doc = [ "babel", "ipykernel", "jinja2", "markupsafe", "myst_parser", "nbsphinx", "pydata-sphinx-theme", "pygments-ipython-console", "pygments", "sphinx-design", "sphinx-tabs", "sphinx",]
 all = [ "polar-bits[dev,doc]",]
 
 [project.gui-scripts]
 id6b-gui = "id6_b.gui.app:main"
+
+# Not gui-scripts: this one is a stdio server, and on Windows that section
+# builds a console-less launcher whose stdout goes nowhere.
+[project.scripts]
+id6b-mcp = "id6_b.mcp_server.server:main"
 
 [project.urls]
 Homepage = "https://BCDA-APS.github.io/BITS/"
