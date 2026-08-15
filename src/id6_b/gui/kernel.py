@@ -201,6 +201,13 @@ def _gui_scan_options():
     Detectors: only those with ``preset_monitor``.  ``configure_counts_wrapper``
     calls ``rd(det.preset_monitor)`` on every detector, so anything else raises
     ``AttributeError`` when scanned.
+
+    ``axis_fields`` maps each axis's *hinted field* back to its dotted path,
+    which is what the Scan plot tab's peak buttons need: a scan's x axis is
+    named in the documents by its hinted field (``psic_h``), not by its path
+    (``psic.h``).  It falls out of the same walk, so it costs no extra
+    round-trip -- and because containers are skipped here, only leaves appear,
+    which is exactly the disambiguation the plans have to do the hard way.
     """
     from ophyd import Signal
 
@@ -210,12 +217,17 @@ def _gui_scan_options():
         except Exception:
             return False
 
-    axes, seen = [], set()
+    axes, seen, fields = [], set(), {}
 
     def _add(obj, path):
         if path not in seen:
             seen.add(path)
             axes.append((path, type(obj).__name__))
+            try:
+                for _f in obj.hints.get("fields", ()):
+                    fields.setdefault(_f, path)
+            except Exception:
+                pass
 
     for _d in sorted(oregistry.root_devices, key=lambda d: d.name):
         _has_axis_children = False
@@ -247,6 +259,7 @@ def _gui_scan_options():
 
     return {
         "axes": axes,
+        "axis_fields": fields,
         "detector_candidates": candidates,
         "detectors_selected": selected,
         "monitor": monitor,

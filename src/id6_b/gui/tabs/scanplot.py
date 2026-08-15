@@ -15,6 +15,14 @@ Data is retained **raw** for all fields regardless of tick state, so enabling a
 curve part-way through a scan shows its full history, and changing the monitor
 recomputes every curve from the values already recorded rather than only
 affecting points from there on.
+
+Under the plot is the **peak row**: ``cen``/``com``/``max``/``min``/``fwhm`` for
+one chosen curve, a dotted vertical marker on the plot for each of the four that
+has a position, and a button that moves the scanned axis onto each.  The
+statistics come from
+:func:`~id6_b.utils.peak_statistics.peak_statistics` fed the *plotted* arrays,
+so a monitor selection is inherited for free -- what the markers show and the
+buttons move to is the peak of the curve on screen, not of the raw detector.
 """
 
 import logging
@@ -26,15 +34,19 @@ from matplotlib.figure import Figure
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import QButtonGroup
 from qtpy.QtWidgets import QCheckBox
+from qtpy.QtWidgets import QComboBox
 from qtpy.QtWidgets import QGridLayout
 from qtpy.QtWidgets import QHBoxLayout
 from qtpy.QtWidgets import QLabel
+from qtpy.QtWidgets import QPushButton
 from qtpy.QtWidgets import QRadioButton
 from qtpy.QtWidgets import QScrollArea
 from qtpy.QtWidgets import QVBoxLayout
 from qtpy.QtWidgets import QWidget
 
+from ...utils.peak_statistics import peak_statistics
 from .base import BaseTab
+from .base import value_label
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +57,44 @@ PRIMARY = "primary"
 #: (``lambda250k_stats1_total``), so the panel scrolls rather than pushing the
 #: canvas out of the way.
 SELECTOR_WIDTH = 260
+
+#: Reuses the Scan tab's helper -- its reply is broadcast to every tab, so
+#: asking for it here costs no extra round-trip.
+OPTIONS_KEY = "scan_options"
+OPTIONS_EXPR = "_gui_scan_options()"
+
+#: The four peak statistics that have a position on the x axis, in the order
+#: they are shown, each with the colour of its marker line.  The same colour is
+#: used for the statistic's name in the peak row and for its "Go to" button,
+#: which is how a line on the plot is identified -- deliberately *not* through
+#: the matplotlib legend, which belongs to the curves.  These are picked away
+#: from the default curve cycle, and the markers are dotted where curves are
+#: solid, so a marker still reads as a marker if a curve lands on the same hue.
+MARKER_STYLES = (
+    ("cen", "#d62728"),
+    ("com", "#1f9e5a"),
+    ("max", "#7b3fb5"),
+    ("min", "#c77f00"),
+)
+
+#: What each statistic means, for the buttons and the toggle.
+MARKER_TOOLTIPS = {
+    "cen": "Midpoint of the two half-maximum crossings — what BEC prints as cen.",
+    "com": "Centre of mass: the intensity-weighted mean position.",
+    "max": "Position of the largest plotted value.",
+    "min": "Position of the smallest plotted value.",
+}
+
+
+def _format(value):
+    """Format a position for display *and* for the generated command.
+
+    ``%.10g`` because the two must be the same string: a button that says
+    ``1.0234`` and then moves to ``1.0234000000000002`` is a button you cannot
+    trust.  Ten significant digits keeps hkl pseudo-axis precision while
+    dropping the float noise that ``repr`` would show.
+    """
+    return f"{float(value):.10g}"
 
 
 class ScanPlotTab(BaseTab):
@@ -71,12 +121,75 @@ class ScanPlotTab(BaseTab):
         middle.addWidget(self._canvas, 1)
         middle.addWidget(self._build_selector_panel(), 0)
         layout.addLayout(middle, 1)
+        layout.addWidget(self._build_peak_row())
         layout.addWidget(self._status)
 
         self._monitor_group = None
+        self._axis_fields = {}
+        self._kernel_idle = False
+        self._scan_running = False
         self._reset_state()
         self._clear_selectors()
         self._draw_placeholder()
+        self._update_peak()
+
+    def _build_peak_row(self):
+        """Peak statistics for one curve, the marker toggle and the four buttons."""
+        self._peak_combo = QComboBox()
+        self._peak_combo.setToolTip("Which curve to find the peak of.")
+        # Real channel names are long ("lambda250k_stats1_total", "Ion Chamber
+        # 2"); at the width Qt picks from the empty combo they all elide to the
+        # same few characters, so there is no telling which curve is selected.
+        self._peak_combo.setMinimumWidth(150)
+        self._peak_combo.currentTextChanged.connect(lambda _text: self._update_peak())
+
+        self._peak_values = value_label("")
+
+        self._markers_box = QCheckBox("Markers")
+        self._markers_box.setChecked(True)
+        self._markers_box.setToolTip(
+            "Draw a dotted vertical line on the plot at each statistic, in the "
+            "colour its name is printed in."
+        )
+        self._markers_box.toggled.connect(lambda _state: self._update_peak())
+
+        # Two lines, not one.  The five statistics at full precision plus four
+        # buttons do not fit across the default 1100 px window, and a QHBoxLayout
+        # does not wrap -- it clips the label instead, which silently ate "min"
+        # and "fwhm".  Splitting gives the numbers the whole width and costs one
+        # row of the canvas.
+        values_row = QHBoxLayout()
+        values_row.setContentsMargins(0, 0, 0, 0)
+        self._peak_label = QLabel("Peak of")
+        values_row.addWidget(self._peak_label)
+        values_row.addWidget(self._peak_combo)
+        values_row.addWidget(self._peak_values, 1)
+
+        buttons_row = QHBoxLayout()
+        buttons_row.setContentsMargins(0, 0, 0, 0)
+        buttons_row.addWidget(self._markers_box)
+        buttons_row.addSpacing(12)
+
+        # One button per statistic, coloured to match its marker so the button,
+        # the name in the peak row and the line on the plot are one thing.
+        self._peak_buttons = {}
+        for name, colour in MARKER_STYLES:
+            button = QPushButton(f"Go to {name}")
+            button.setStyleSheet(f"color: {colour};")
+            button.clicked.connect(lambda _checked=False, n=name: self._go_to(n))
+            self._peak_buttons[name] = button
+            buttons_row.addWidget(button)
+        buttons_row.addStretch(1)
+
+        column = QVBoxLayout()
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(2)
+        column.addLayout(values_row)
+        column.addLayout(buttons_row)
+
+        self._peak_row = QWidget()
+        self._peak_row.setLayout(column)
+        return self._peak_row
 
     def _build_selector_panel(self):
         """The Plot / Mon columns, down the right-hand side of the canvas."""
@@ -119,6 +232,12 @@ class ScanPlotTab(BaseTab):
         self._grid_cells = []
         self._image = None
         self._colorbar = None
+        # Peak statistics of the field named in the peak combo, or None.
+        self._peak_stats = None
+        # statistic -> the axvline drawn for it.  Emptied here rather than
+        # removed: _on_start clears the axes straight afterwards, which takes
+        # the artists with it.
+        self._marker_lines = {}
 
     def _clear_selectors(self):
         while self._selector_grid.count():
@@ -208,6 +327,8 @@ class ScanPlotTab(BaseTab):
             self._axes.grid(True, alpha=0.3)
         self._canvas.draw_idle()
         self._status.setText(f"Scan #{scan_id} ({plan}) running…")
+        self._scan_running = True
+        self._update_peak()
 
     @staticmethod
     def _grid_geometry(doc, hints, dimensions):
@@ -252,6 +373,7 @@ class ScanPlotTab(BaseTab):
                 next((f for f in plottable if f in hinted), None)
                 or (plottable[0] if plottable else None)
             )
+        self._update_peak()
 
     def _candidate_fields(self, descriptor):
         """Return (hinted fields, all plottable fields) for this descriptor.
@@ -350,6 +472,7 @@ class ScanPlotTab(BaseTab):
                 )
             self._rebuild_grid()
             self._update_status()
+            self._update_peak()
             return
 
         for name, series in self._series.items():
@@ -361,6 +484,7 @@ class ScanPlotTab(BaseTab):
             line.set_visible(self._shown(series))
         self._rescale()
         self._update_status()
+        self._update_peak()
 
     def _on_toggle(self, field, checked):
         series = self._series.get(field)
@@ -376,6 +500,7 @@ class ScanPlotTab(BaseTab):
             series["line"].set_visible(self._shown(series))
         self._rescale()
         self._update_status()
+        self._update_peak()
 
     # -- 2D (mesh) rendering ----------------------------------------------
 
@@ -577,6 +702,189 @@ class ScanPlotTab(BaseTab):
         reason = doc.get("exit_status", "completed")
         self._status.setText(f"Scan {reason} — {len(self._x_data)} points.")
         self._canvas.draw_idle()
+        self._scan_running = False
+        self._update_peak()
+
+    # -- peak statistics, markers and the move buttons ---------------------
+
+    def _peak_field(self):
+        """Which curve the peak row describes: the combo's choice, if drawn."""
+        shown = [name for name, s in self._series.items() if self._shown(s)]
+        current = self._peak_combo.currentText()
+        if current not in shown:
+            current = shown[0] if shown else ""
+        # Repopulate only when the list really changed, or the combo fights the
+        # user by resetting the choice on every event.
+        combo = self._peak_combo
+        existing = [combo.itemText(i) for i in range(combo.count())]
+        if existing != shown:
+            blocked = self._peak_combo.blockSignals(True)
+            self._peak_combo.clear()
+            self._peak_combo.addItems(shown)
+            self._peak_combo.blockSignals(blocked)
+        if current:
+            blocked = self._peak_combo.blockSignals(True)
+            self._peak_combo.setCurrentText(current)
+            self._peak_combo.blockSignals(blocked)
+        return current or None
+
+    def _peak_axis(self):
+        """Dotted path of the scanned axis, or None if it cannot be resolved.
+
+        The documents name the axis by its *hinted field* (``psic_h``); the
+        command has to name it by a path that is valid Python in the session
+        (``psic.h``).  ``_gui_scan_options()`` supplies the map.
+        """
+        if not self._x_field or self._use_elapsed_time:
+            return None
+        return self._axis_fields.get(self._x_field)
+
+    @staticmethod
+    def _stat_position(stats, name):
+        """x of a statistic, or None.  ``max``/``min`` are ``(x, y)`` pairs."""
+        value = (stats or {}).get(name)
+        if value is None:
+            return None
+        return value[0] if name in ("max", "min") else value
+
+    def _update_peak(self):
+        """Recompute the peak row and markers, and set the buttons' state."""
+        self._peak_stats = None
+
+        # A mesh has two axes and no single peak; count() has no axis at all.
+        if self._grid or self._use_elapsed_time or not self._series:
+            self._peak_row.setVisible(False)
+            self._draw_markers({})
+            return
+        self._peak_row.setVisible(True)
+
+        field = self._peak_field()
+        if field is None:
+            self._show_peak("No curve selected.", {})
+            self._draw_markers({})
+            return
+
+        series = self._series[field]
+        stats = peak_statistics(self._x_data, self._values(series))
+        self._peak_stats = stats
+
+        positions = {
+            name: self._stat_position(stats, name) for name, _colour in MARKER_STYLES
+        }
+        # The statistic's name carries its marker's colour, so the peak row is
+        # the key to the plot.  Rich text collapses runs of spaces, hence the
+        # explicit gaps.
+        parts = [
+            f'<span style="color:{colour}; font-weight:bold">{name}</span> '
+            + (_format(positions[name]) if positions[name] is not None else "—")
+            for name, colour in MARKER_STYLES
+        ]
+        parts.append(
+            f"fwhm {_format(stats['fwhm'])}" if stats["fwhm"] is not None else "fwhm —"
+        )
+        self._show_peak("&nbsp;&nbsp;&nbsp;".join(parts), positions)
+        self._draw_markers(positions)
+
+    def _show_peak(self, text, positions):
+        """Fill in the peak row, disabling each button that cannot act."""
+        self._peak_values.setText(text)
+        axis = self._peak_axis()
+
+        if self._scan_running:
+            reason = "Wait for the scan to finish."
+        elif not self._kernel_idle:
+            reason = "The kernel is busy."
+        elif axis is None:
+            reason = (
+                f"Cannot work out which device reports '{self._x_field}'."
+                if self._x_field
+                else "No scanned axis."
+            )
+        else:
+            reason = None
+
+        for name, _colour in MARKER_STYLES:
+            button = self._peak_buttons[name]
+            position = positions.get(name)
+            button.setEnabled(reason is None and position is not None)
+            # The value is *not* repeated on the button: four of them, each with
+            # a ten-significant-digit position, overran the row and clipped the
+            # labels.  The peak row prints the number a couple of centimetres to
+            # the left in this button's own colour, and the tooltip carries the
+            # exact command, so nothing is lost by keeping the button short.
+            if reason is not None:
+                button.setToolTip(reason)
+            elif position is None:
+                button.setToolTip(f"This curve has no {name}.")
+            else:
+                button.setToolTip(
+                    f"{MARKER_TOOLTIPS[name]}\nRE(mv({axis}, {_format(position)}))"
+                )
+
+    def _draw_markers(self, positions):
+        """One dotted vertical line per statistic, or none if the box is off.
+
+        Called from ``_update_peak`` only, which is not run per event, so the
+        markers settle once the scan ends rather than jittering through it.
+        """
+        wanted = self._markers_box.isChecked()
+        for name, colour in MARKER_STYLES:
+            position = positions.get(name)
+            line = self._marker_lines.get(name)
+            if not wanted or position is None:
+                if line is not None:
+                    self._remove_marker(name)
+                continue
+            if line is None:
+                # "_nolegend_": the legend is the curves' -- a marker is named
+                # by the colour of its statistic in the peak row instead.
+                self._marker_lines[name] = self._axes.axvline(
+                    position,
+                    color=colour,
+                    linestyle=":",
+                    linewidth=1.5,
+                    label="_nolegend_",
+                )
+            else:
+                line.set_xdata([position, position])
+        self._canvas.draw_idle()
+
+    def _remove_marker(self, name):
+        line = self._marker_lines.pop(name, None)
+        if line is None:
+            return
+        try:
+            line.remove()
+        except (ValueError, NotImplementedError):
+            # Already gone with an axes.clear(); nothing left to do.
+            pass
+
+    def _go_to(self, statistic):
+        """Move the scanned axis onto *statistic* of the displayed curve."""
+        axis = self._peak_axis()
+        value = self._stat_position(self._peak_stats, statistic)
+        if axis is None or value is None:
+            return
+        # An explicit literal rather than RE(cen()): it is exactly the number
+        # on the button, it needs no catalog round-trip, and it reads back in
+        # the session history as an ordinary move.
+        self.run_in_console(f"RE(mv({axis}, {_format(value)}))")
+
+    # -- kernel exchange ----------------------------------------------------
+
+    def refresh(self):
+        """Re-read the axis list, which is how a hinted field becomes a path."""
+        self.request({OPTIONS_KEY: OPTIONS_EXPR})
+
+    def on_kernel_values(self, values):
+        """Pick up the hinted-field to dotted-path map."""
+        options = values.get(OPTIONS_KEY)
+        if not isinstance(options, dict):
+            return
+        fields = options.get("axis_fields")
+        if isinstance(fields, dict):
+            self._axis_fields = fields
+            self._update_peak()
 
     # -- misc -------------------------------------------------------------
 
@@ -596,5 +904,9 @@ class ScanPlotTab(BaseTab):
 
     def on_kernel_state(self, state):
         """Note when the kernel is gone, so a stalled plot is explicable."""
+        self._kernel_idle = state == "idle"
+        if state == "idle" and not self._axis_fields:
+            self.refresh()
         if state == "dead":
             self._status.setText("Kernel is not running.")
+        self._update_peak()
