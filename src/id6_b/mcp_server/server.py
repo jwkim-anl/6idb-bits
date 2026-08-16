@@ -46,10 +46,10 @@ Two devices. `psic_sim` is a simulator and is the default -- use it to try
 something out. `psic` is the real instrument and must be named explicitly on
 every call.
 
-**You cannot move anything.** move_hkl, move_axes and run_scan validate the
-request and then park it for the human operator, who approves or rejects it in
-the GUI. They return immediately, saying "awaiting approval"; that is success,
-not completion. After one:
+**You cannot change anything by yourself.** move_hkl, move_axes, set_signals
+and run_scan validate the request and then park it for the human operator, who
+approves or rejects it in the GUI. They return immediately, saying "awaiting
+approval"; that is success, not completion. After one:
 
   - Poll get_request_status. Do NOT send the request again -- a second one
     while the first is pending is refused, and re-asking is how a queue of
@@ -74,8 +74,17 @@ Orientation setup, in this order -- each step depends on the one before:
    constant. The order matters: which axes can be fixed depends on the mode.
 6. hkl_calc_angles to solve an hkl into angles. Nothing moves.
 
+Two kinds of thing can be changed, and they do not overlap:
+
+  - Axes are *moved*: list_axes, then move_axes (or move_hkl, or run_scan).
+  - Everything else writable is *set*: list_signals, then set_signals. That is
+    where a filter transmission, a source-meter voltage, a temperature
+    setpoint or a mode enum lives. Ask list_signals with no argument for the
+    devices that have any, then again with device_name for one device's
+    signals and what each accepts.
+
 Reading is free and leaves no trace in the operator's console: list_axes,
-read_axes, get_counters, get_last_scan, get_session_status.
+read_axes, list_signals, get_counters, get_last_scan, get_session_status.
 
 If a call reports the session is busy, a scan or an approved move is running.
 get_session_status still answers -- it reads the motors over Channel Access
@@ -400,6 +409,33 @@ def _add_tools(mcp, session):
         )
 
     @mcp.tool()
+    def set_signals(targets: dict, allow_large_move: bool = False) -> dict:
+        """Ask the operator to set writable EPICS signals to absolute values.
+
+        This is the counterpart of move_axes for the things that are *set*
+        rather than moved -- a filter transmission, a source-meter voltage, a
+        temperature setpoint, an enum that picks a mode.  *targets* maps a
+        dotted signal path to a value, e.g.
+        ``{"filters.transmission": 0.1}``.  Use list_signals for the paths and
+        for what each one accepts; anything not in that list is refused by
+        name, and a path that is really a motor is refused with a pointer to
+        move_axes.
+
+        A signal with named settings takes the name, not the number:
+        ``{"filters.energy_select": "Local"}``.  A name that is not one of its
+        choices comes back with the choices listed.
+
+        **Returns before anything is written**, exactly like move_hkl -- a
+        filter that goes in changes what the next scan measures as surely as a
+        motor does, so it goes through the same approval gate.  Every target is
+        checked before anything is parked, and one bad target refuses the whole
+        request.
+        """
+        return session_call(
+            "request_signals", targets=targets, allow_large_move=allow_large_move
+        )
+
+    @mcp.tool()
     def run_scan(
         plan: str,
         points: int,
@@ -489,6 +525,24 @@ def _add_tools(mcp, session):
         wanted.
         """
         return session_call("read_axes", axes=axes)
+
+    @mcp.tool()
+    def list_signals(device_name: str = None) -> dict:
+        """List the writable EPICS signals that set_signals can set.
+
+        Everything that is *set* rather than moved: a filter transmission, a
+        source-meter voltage, a temperature setpoint, an enum that picks a
+        mode.  Motor-like axes are deliberately absent -- they are in
+        list_axes, and are moved with move_axes.
+
+        With no argument, the devices that have any and how many, which is
+        short.  With *device_name* -- ``"filters"``, ``"keithley2400"`` -- that
+        device's signals in full: the dotted path set_signals accepts, the
+        current value, the soft limits where the IOC publishes them, the units,
+        and the ``choices`` of a signal that is set by name.  A device at a
+        time, because reading each value is a channel-access round trip.
+        """
+        return session_call("list_signals", name=device_name)
 
     @mcp.tool()
     def get_counters() -> dict:

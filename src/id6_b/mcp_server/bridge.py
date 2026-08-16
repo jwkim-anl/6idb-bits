@@ -166,6 +166,12 @@ def _gui_mcp_ops():
             True,
             "session",
         ),
+        "request_signals": (
+            _gui_mcp_request_signals,
+            ("targets", "allow_large_move"),
+            True,
+            "session",
+        ),
         "request_scan": (
             _gui_mcp_request_scan,
             ("plan", "axes", "points", "time", "detectors", "fixq",
@@ -178,6 +184,7 @@ def _gui_mcp_ops():
         "get_request": (_gui_mcp_request_state, (), False, "session"),
         "list_axes": (_gui_mcp_list_axes, (), False, "session"),
         "read_axes": (_gui_mcp_read_axes, ("axes",), False, "session"),
+        "list_signals": (_gui_mcp_list_signals, ("name",), False, "session"),
         "get_counters": (_gui_mcp_counters, (), False, "session"),
         "get_last_scan": (_gui_mcp_last_scan, (), False, "session"),
     }
