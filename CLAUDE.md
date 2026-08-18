@@ -674,9 +674,34 @@ def align():
   is typing. Old rows get `setParent(None)` *as well as* `deleteLater()`, the
   trap `ScanPlotTab._clear_selectors` documents.
 
+  **ψ is in this block too, and it is not a constant axis.** A `psi_constant_*`
+  mode holds ψ fixed exactly as surely as it holds `mu` and `nu`, but ψ is a
+  member of `core.extras` — a different hklpy2 concept — and never appears in
+  `constant_axis_names`, so a `constant_axis_names`-only panel showed `mu` and
+  `nu` and silently omitted the one value the mode is named after.
+  `_gui_hkl_state` therefore also returns **`extra_axes`**, the extras that are
+  not the ψ reference (`h2/k2/l2` have their own boxes), and
+  `_rebuild_preset_rows(axes, extras)` renders those as rows in the same grid.
+  They get **no Fix check box** — `(always)` in place of one — because an extra
+  has no "follow the motor" fallback to untick: a mode that defines an extra
+  always uses it.
+
+  Which is why **the Calculate row no longer has its own ψ box**. ψ used to
+  live in both places, and they disagreed: typing ψ under Fixed angles started
+  the 400 ms debounce, and pressing Calculate immediately after sent the
+  Calculate row's stale value instead. There is now one ψ widget, in the Mode
+  group, and `_calculate()` reads it out of `_extra_values()`.
+
   Writes are debounced 400 ms (`_presets_timer`), a clone of the ψ reference
-  boxes' `_reference_timer`, and go through `_gui_hkl_set_presets`. Three
-  details that matter:
+  boxes' `_reference_timer`, and go through `_gui_hkl_set_fixed` — presets and
+  extras in **one** call, because the tab shows them in one block and applies
+  them from one timer, and two calls would race for the same reply slot so only
+  one message would survive. Note the asymmetry between the two setters:
+  hklpy2's `presets` setter drops an unknown axis silently, while its `extras`
+  setter **raises `ConfigurationError`**, so `_gui_hkl_set_extras` filters
+  against `list(dev.core.extras)` before writing. It also relies on
+  `_extras.update()` merging, which is what lets ψ be written without
+  disturbing `h2/k2/l2`. Three more details that matter:
   - hklpy2's `presets` setter **silently drops** any axis not constant in the
     current mode (`ops.py:862`), so the helper checks against
     `constant_axis_names` first and names the dropped ones in its reply instead

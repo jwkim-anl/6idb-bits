@@ -207,6 +207,14 @@ def _gui_hkl_state(name):
         state["extras"] = {k: _gui_hkl_f(v) for k, v in dev.core.extras.items()}
     except Exception:
         state["extras"] = {}
+    # The mode's extra solver parameters, minus the psi reference vector,
+    # which has its own boxes.  In a psi_constant mode this is ['psi'] -- a
+    # value the mode holds constant just as surely as it holds mu and nu, but
+    # one that never appears in ``constant_axis_names`` because it is not a
+    # real axis.  The tab shows these alongside the fixed angles.
+    state["extra_axes"] = [
+        k for k in state["extras"] if k not in ("h2", "k2", "l2")
+    ]
     try:
         state["ub"] = [[_gui_hkl_f(v) for v in row] for row in dev.sample.UB]
     except Exception:
@@ -387,6 +395,59 @@ def _gui_hkl_set_presets(name, values):
             + ", not held constant in this mode"
         )
     return message
+
+
+def _gui_hkl_set_extras(name, values):
+    """Set the current mode's extra solver parameters, e.g. psi.
+
+    An extra is not a preset.  A preset is optional -- an axis left out of
+    ``core.presets`` follows its motor -- whereas a mode that defines an
+    extra always uses it, so there is nothing to leave out and no checkbox
+    to untick.
+
+    hklpy2 *raises* ``ConfigurationError`` on an extra the current mode does
+    not define, so the names are filtered against ``core.extras`` first: a
+    psi sent in the wrong mode is reported rather than taking the whole
+    write down with it.
+    """
+    dev = _gui_hkl_dev(name)
+    try:
+        known = list(dev.core.extras)
+    except Exception as exc:
+        return f"Could not read the extra parameters: {exc}"
+    try:
+        wanted = {k: float(v) for k, v in (values or {}).items()}
+    except Exception as exc:
+        return f"Extra parameters must be numbers: {exc}"
+    ignored = sorted(k for k in wanted if k not in known)
+    accepted = {k: v for k, v in wanted.items() if k in known}
+    if accepted:
+        try:
+            dev.core.extras = accepted
+        except Exception as exc:
+            return f"Could not set the extra parameters: {exc}"
+    message = "Fixed " + (
+        ", ".join(f"{k}={v:g}" for k, v in accepted.items()) or "nothing"
+    )
+    if ignored:
+        message += (
+            " -- ignored " + ", ".join(ignored)
+            + f", not used by mode {dev.core.mode}"
+        )
+    return message
+
+
+def _gui_hkl_set_fixed(name, presets, extras):
+    """Write the mode's fixed angles and its extra parameters together.
+
+    Two different things, written in one call because the tab shows them in
+    one block and applies them from one debounce timer -- two separate calls
+    would race for the same reply slot and only one message would survive.
+    """
+    messages = [_gui_hkl_set_presets(name, presets)]
+    if extras:
+        messages.append(_gui_hkl_set_extras(name, extras))
+    return "  ".join(messages)
 
 
 def _gui_hkl_set_mode(name, mode):

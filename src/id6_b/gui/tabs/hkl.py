@@ -248,16 +248,26 @@ class HklTab(BaseTab):
         # One row per axis the mode holds constant, rebuilt when the mode
         # changes.  Ticked means "solve for this hkl with the axis at *this*
         # angle"; unticked means "use whatever the motor currently reads".
+        #
+        # Plus one row per *extra* the mode defines -- psi, in a psi_constant
+        # mode.  An extra is held constant just as surely as mu or nu, but it
+        # is not a real axis, so it never appears in ``constant_axis_names``
+        # and would otherwise have nowhere to be shown.  It has no checkbox:
+        # a mode that defines an extra always uses it, so there is no
+        # "follow the motor" state to switch to.
         self._preset_host = QWidget()
         self._preset_grid = QGridLayout(self._preset_host)
         self._preset_grid.setContentsMargins(0, 0, 0, 0)
         self._preset_rows = {}
         self._preset_axes = []
+        self._extra_rows = {}
+        self._extra_axes = []
         form.addRow("Fixed angles:", self._preset_host)
         caption = QLabel(
             "Ticked axes are held at the value shown when solving; unticked "
-            "axes follow the motor.  Presets change the calculation only — "
-            "nothing moves."
+            "axes follow the motor.  A row marked (always) is a parameter of "
+            "the mode itself and is always in force.  Both change the "
+            "calculation only — nothing moves."
         )
         caption.setWordWrap(True)
         form.addRow("", caption)
@@ -266,20 +276,23 @@ class HklTab(BaseTab):
         form.addRow("In effect:", self._presets_label)
         return box
 
-    def _rebuild_preset_rows(self, axes):
-        """Build one Fix checkbox + angle box per constant axis of the mode.
+    def _rebuild_preset_rows(self, axes, extras):
+        """Build the mode's fixed-angle rows: constant axes, then extras.
 
-        Only rebuilt when the axis list itself changes: the values are
+        Only rebuilt when either list itself changes: the values are
         refreshed on every state read, and tearing the widgets down each time
         would pull the box out from under whoever is typing in it.
         """
         axes = list(axes or [])
-        if axes == self._preset_axes:
+        extras = list(extras or [])
+        if axes == self._preset_axes and extras == self._extra_axes:
             return
         self._preset_axes = axes
+        self._extra_axes = extras
 
-        for check, spin, unit in self._preset_rows.values():
-            for widget in (check, spin, unit):
+        rows = list(self._preset_rows.values()) + list(self._extra_rows.values())
+        for widgets in rows:
+            for widget in widgets:
                 # setParent(None) as well as deleteLater(): a deferred delete
                 # is not processed until the event loop comes round, and until
                 # then the old widget still paints over its former cell.
@@ -287,11 +300,15 @@ class HklTab(BaseTab):
                 widget.setParent(None)
                 widget.deleteLater()
         self._preset_rows = {}
+        self._extra_rows = {}
 
-        if not axes:
-            return
-        for row, axis in enumerate(axes):
+        row = 0
+        for axis in axes:
             check = QCheckBox(axis)
+            check.setToolTip(
+                f"Hold {axis} at the value shown when solving.  Unticked, "
+                f"{axis} follows its motor."
+            )
             check.toggled.connect(self._on_preset_changed)
             spin = _spin(-360.0, 360.0, 0.0, decimals=4)
             spin.valueChanged.connect(self._on_preset_changed)
@@ -300,6 +317,23 @@ class HklTab(BaseTab):
             self._preset_grid.addWidget(spin, row, 1)
             self._preset_grid.addWidget(unit, row, 2)
             self._preset_rows[axis] = (check, spin, unit)
+            row += 1
+        for name in extras:
+            label = QLabel(f"{name} (always)")
+            label.setToolTip(
+                f"{name} is a parameter of mode "
+                f"{(self._state or {}).get('mode', '')}, not an axis.  The "
+                "mode always solves with the value shown, so there is "
+                "nothing to untick."
+            )
+            spin = _spin(-360.0, 360.0, 0.0, decimals=4)
+            spin.valueChanged.connect(self._on_preset_changed)
+            unit = QLabel("deg")
+            self._preset_grid.addWidget(label, row, 0)
+            self._preset_grid.addWidget(spin, row, 1)
+            self._preset_grid.addWidget(unit, row, 2)
+            self._extra_rows[name] = (label, spin, unit)
+            row += 1
         self._preset_grid.setColumnStretch(3, 1)
 
     def _preset_values(self):
@@ -308,6 +342,13 @@ class HklTab(BaseTab):
             axis: spin.value()
             for axis, (check, spin, _unit) in self._preset_rows.items()
             if check.isChecked()
+        }
+
+    def _extra_values(self):
+        """Return ``{name: value}`` for the mode's extras -- all of them."""
+        return {
+            name: spin.value()
+            for name, (_label, spin, _unit) in self._extra_rows.items()
         }
 
     def _build_current_group(self):
@@ -338,9 +379,11 @@ class HklTab(BaseTab):
             self._calc_boxes[name] = spin
             row.addWidget(QLabel(name))
             row.addWidget(spin)
-        row.addWidget(QLabel("ψ"))
-        self._psi_box = _spin(-360.0, 360.0, 0.0, decimals=4)
-        row.addWidget(self._psi_box)
+        # No ψ box here: in a psi_constant mode ψ is one of the mode's fixed
+        # values and lives in the Mode group with the other ones.  It used to
+        # be in both places, and the two disagreed -- typing ψ under Fixed
+        # angles and then pressing Calculate solved against this box's stale
+        # value instead.
         self._calc_button = QPushButton("Calculate")
         self._calc_button.clicked.connect(self._calculate)
         row.addWidget(self._calc_button)
@@ -462,14 +505,21 @@ class HklTab(BaseTab):
             constant_axes = state.get("constant_axes") or []
             self._constant_label.setText(", ".join(constant_axes) or PLACEHOLDER)
             presets = state.get("presets") or {}
-            self._rebuild_preset_rows(constant_axes)
+            extras = state.get("extras") or {}
+            self._rebuild_preset_rows(constant_axes, state.get("extra_axes"))
             for axis, (check, spin, _unit) in self._preset_rows.items():
                 value = presets.get(axis)
                 check.setChecked(value is not None)
                 if value is not None:
                     spin.setValue(value)
+            for name, (_label, spin, _unit) in self._extra_rows.items():
+                value = extras.get(name)
+                if value is not None:
+                    spin.setValue(value)
+            in_effect = dict(presets)
+            in_effect.update({k: v for k, v in extras.items() if k in self._extra_rows})
             self._presets_label.setText(
-                ", ".join(f"{k}={v:g}" for k, v in presets.items())
+                ", ".join(f"{k}={v:g}" for k, v in in_effect.items())
                 or ("none — every constant axis follows its motor")
             )
 
@@ -577,13 +627,12 @@ class HklTab(BaseTab):
             self._reflection_table,
             *self._ref_boxes.values(),
             *(w for row in self._preset_rows.values() for w in row[:2]),
+            *(row[1] for row in self._extra_rows.values()),
         ):
             widget.setEnabled(editable)
         # Move only after a successful calculation, so the confirmation can
         # only ever show angles the solver actually returned.
         self._move_button.setEnabled(editable and bool(self._calculated))
-        mode = (self._state or {}).get("mode", "")
-        self._psi_box.setEnabled(editable and "psi_constant" in mode)
 
     # -- actions ----------------------------------------------------------
 
@@ -708,10 +757,13 @@ class HklTab(BaseTab):
         self._presets_timer.start()
 
     def _apply_presets(self):
-        """Write the fixed angles (fired by the debounce timer)."""
+        """Write the fixed angles and mode extras (fired by the timer)."""
         if not self._state:
             return
-        self._act(f"_gui_hkl_set_presets({self.device!r}, {self._preset_values()!r})")
+        self._act(
+            f"_gui_hkl_set_fixed({self.device!r}, {self._preset_values()!r}, "
+            f"{self._extra_values()!r})"
+        )
 
     def _on_reference_changed(self, _value):
         """Queue a psi-reference write after the user stops editing."""
@@ -733,7 +785,7 @@ class HklTab(BaseTab):
         h = self._calc_boxes["h"].value()
         k = self._calc_boxes["k"].value()
         pos_l = self._calc_boxes["l"].value()
-        psi = self._psi_box.value() if self._psi_box.isEnabled() else None
+        psi = self._extra_values().get("psi")
         # The fixed angles go with the request rather than being left to the
         # debounce timer, so Calculate pressed straight after typing cannot
         # solve against the previous value.
@@ -756,8 +808,10 @@ class HklTab(BaseTab):
         angles = "\n".join(f"    {k2} = {v:.4f}" for k2, v in self._calculated.items())
         warning = "REAL MOTORS WILL MOVE.\n\n" if self.device == "psic" else ""
         # A fixed angle decides which of many solutions this is, so it belongs
-        # in the box that asks whether to go there.
-        fixed = self._preset_values()
+        # in the box that asks whether to go there.  ψ decides it just as much,
+        # so the mode's extras are listed with the presets.
+        fixed = dict(self._preset_values())
+        fixed.update(self._extra_values())
         fixed_text = (
             "\nFixed: " + ", ".join(f"{a}={v:g}" for a, v in fixed.items()) + "\n"
             if fixed
