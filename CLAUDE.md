@@ -718,6 +718,13 @@ def align():
   A fixed angle decides *which* of many solutions the Move goes to, so the
   confirmation dialog lists it.
 
+  The **Calculate and move** row caps its h/k/l boxes at `VALUE_WIDTH` and ends
+  in `addStretch(1)`, the `QHBoxLayout` counterpart of the explicit column
+  stretches `tabs/scan.py` documents: with every item left at the default
+  stretch Qt shared the row's surplus width out over all of them, so each
+  one-character label was stretched to ~107 px and `h` sat an inch from its own
+  value box.
+
   A **progress bar sits under the Move button**. The kernel's shell channel is
   blocked for the whole move, so progress cannot be polled through it — the
   readback PVs are watched **directly over Channel Access from the GUI

@@ -58,6 +58,11 @@ MOVE_GRACE_S = 2.0
 #: Stop following a move after this long rather than spinning forever.
 MOVE_TIMEOUT_S = 600.0
 
+#: Cap on a numeric entry box, as in the Scan and Macro tabs.  A row of
+#: widgets with no stretch factor shares its surplus width out among all of
+#: them, so an uncapped box grows and drags its label away from it.
+VALUE_WIDTH = 110
+
 LATTICE_RANGES = {
     "a": (0.01, 1000.0),
     "b": (0.01, 1000.0),
@@ -376,9 +381,17 @@ class HklTab(BaseTab):
         self._calc_boxes = {}
         for name in ("h", "k", "l"):
             spin = _spin(-100.0, 100.0, 0.0, decimals=4)
+            # Cap the box and let the trailing stretch below take the slack.
+            # Uncapped, the row's surplus width was shared out over every
+            # widget in it, so each one-character label was stretched to
+            # ~107 px and its value box ended up an inch to the right of it.
+            spin.setMaximumWidth(VALUE_WIDTH)
             self._calc_boxes[name] = spin
-            row.addWidget(QLabel(name))
+            label = QLabel(name)
+            label.setBuddy(spin)
+            row.addWidget(label)
             row.addWidget(spin)
+            row.addSpacing(12)
         # No ψ box here: in a psi_constant mode ψ is one of the mode's fixed
         # values and lives in the Mode group with the other ones.  It used to
         # be in both places, and the two disagreed -- typing ψ under Fixed
@@ -391,6 +404,7 @@ class HklTab(BaseTab):
         self._move_button.clicked.connect(self._move)
         self._move_button.setEnabled(False)
         row.addWidget(self._move_button)
+        row.addStretch(1)
         outer.addLayout(row)
 
         self._calc_result = value_label()
