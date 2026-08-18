@@ -631,6 +631,30 @@ def align():
   original mode; and `compute_UB`'s `forward(1, 0, 0)` after `calc_UB`, without
   which a later `wh()` fails.
 
+  **The ψ readout comes from a second geometry, and it needs the whole sample.**
+  `_gui_hkl_derived` reads ψ off `psic_psi` (the `psi` engine on the same
+  motors) and 2θ off `psic_q`. 2θ is `4π sin θ / λ` from the angles alone, so
+  `psic_q` needs nothing; ψ is measured against `UB · (h2, k2, l2)`, and hklpy2
+  pushes *lattice and UB together* to the solver, so a `psic_psi` left on its
+  default 1 Å cubic lattice answers against the wrong reference vector.
+  Copying UB alone — what the code did — happens to give the right ψ for a
+  cubic sample with an on-axis reference, and a wrong one otherwise: on
+  a=b=3, c=12, γ=120 with the reference at (1, 0, 1), −90° instead of −37.8°.
+  `_gui_hkl_mirror_sample(src, dst)` copies both, and three things about it are
+  deliberate. **Lattice first**, because a lattice write flags
+  `_SolverDirty.SAMPLE | _SolverDirty.UB` and hklpy2's own comment warns that
+  some backends discard U/UB as a side effect. **Parameter by parameter**,
+  because `Sample.lattice`'s setter rebinds `_on_change` on whatever object it
+  is handed, so assigning the source's `Lattice` would redirect the *source*
+  sample's change notification. And **each half guarded by an equality check**,
+  because this runs on the 1 Hz poll and every assignment flags the solver
+  dirty; verified to write nothing on a repeat poll and to propagate on the
+  next poll after a real lattice change.
+
+  Note `devices.yml` binds `psic_psi` to `psic`'s *real* motors, so the ψ shown
+  while the tab is displaying `psic_sim` is derived from the real machine's
+  angles. Pre-existing, and not something the mirror changes.
+
   **Fixed angles.** Every mode solves some real axes and holds the rest
   constant, and for a constant axis `forward()` uses a *preset* if the mode has
   one and otherwise the live motor reading (`hklpy2/ops.py:625`). The Mode group

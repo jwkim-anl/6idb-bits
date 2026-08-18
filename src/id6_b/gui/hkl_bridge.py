@@ -39,11 +39,52 @@ def _gui_hkl_dev(name):
     return oregistry.find(name)
 
 
+def _gui_hkl_lattice(sample):
+    """The six lattice constants of *sample*, as plain floats."""
+    return {
+        _p: _gui_hkl_f(getattr(sample.lattice, _p))
+        for _p in ("a", "b", "c", "alpha", "beta", "gamma")
+    }
+
+
+def _gui_hkl_mirror_sample(src, dst):
+    """Copy *src*'s lattice and UB onto *dst*, the psi helper geometry.
+
+    Both halves are needed.  The psi engine solves against *dst*'s own
+    sample, which starts life as a default cubic one, and hklpy2 pushes the
+    whole sample -- lattice included -- to the solver; a UB copied onto a
+    mismatched lattice gives a psi computed for the wrong crystal.
+
+    **Lattice before UB.**  Assigning a lattice parameter flags
+    ``_SolverDirty.SAMPLE | _SolverDirty.UB`` because some backends discard
+    U/UB when the sample is re-pushed, so the other order can throw the
+    matrix away again.
+
+    Each half is skipped when it already matches: this runs on the 1 Hz
+    position poll and every assignment flags the solver dirty, forcing a
+    re-sync that is pure cost when nothing changed.
+
+    The lattice is copied parameter by parameter rather than by assigning
+    ``src.sample.lattice`` itself: ``Sample.lattice``'s setter rebinds
+    ``_on_change`` on whatever object it is given, so sharing one Lattice
+    would redirect the source sample's own change notification to *dst*.
+    """
+    want = _gui_hkl_lattice(src.sample)
+    if _gui_hkl_lattice(dst.sample) != want:
+        for _p, _v in want.items():
+            if _v is not None:
+                setattr(dst.sample.lattice, _p, _v)
+    ub = [[_gui_hkl_f(_v) for _v in _row] for _row in src.sample.UB]
+    if [[_gui_hkl_f(_v) for _v in _row] for _row in dst.sample.UB] != ub:
+        dst.sample.UB = ub
+
+
 def _gui_hkl_derived(dev):
     """Return (two_theta, psi, psi_reference) using the helper geometries.
 
     Mirrors ``hkl_utils_pete._wh()``: the psi geometry needs the main
-    diffractometer's UB copied onto it before ``inverse()`` means anything.
+    diffractometer's sample copied onto it before ``inverse()`` means
+    anything.
     """
     import math
 
@@ -61,7 +102,7 @@ def _gui_hkl_derived(dev):
         pass
     try:
         _p = _gui_hkl_dev("%(psi)s")
-        _p.sample.UB = dev.sample.UB
+        _gui_hkl_mirror_sample(dev, _p)
         psi = _gui_hkl_f(_p.inverse(0).psi)
         reference = {k: _gui_hkl_f(v) for k, v in _p.core.extras.items()}
     except Exception:
