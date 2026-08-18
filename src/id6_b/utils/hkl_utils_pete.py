@@ -887,6 +887,7 @@ def _wh():
     _geom_ = get_diffractometer()
     _geom_for_psi_ = geometries.psi
     _geom_for_psi_.sample.UB = _geom_.sample.UB
+    _geom_for_psi_.sample.lattice = _geom_.sample.lattice
     _geom_for_q_ = geometries.q2
     print(
         f"\n   {' '.join(_geom_.pseudo_positioners._fields).upper()}"
