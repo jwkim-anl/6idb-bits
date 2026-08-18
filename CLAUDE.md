@@ -1071,7 +1071,7 @@ Four layers, split so the middle two are testable before the SDK exists:
   raises — transport failures come back in the same `{"ok", "message", "data"}`
   shape as a refusal, so a caller does not have to tell them apart by type.
 
-- **`server.py`** — the protocol layer: 27 tools, each one line into
+- **`server.py`** — the protocol layer: 29 tools, each one line into
   `HklSession.call`, plus `build()` and `main()` (the `id6b-mcp` console
   script). Under `[project.scripts]`, **not** `[project.gui-scripts]`, which on
   Windows builds a console-less launcher whose stdout — the protocol channel —
@@ -1110,6 +1110,113 @@ Four layers, split so the middle two are testable before the SDK exists:
   poll `get_request_status` and must not re-request in the meantime, and that a
   guard refusal is a reason to ask the operator rather than to retry with
   `allow_large_move`.
+
+  **Signals are set, not moved** — `list_signals(device_name)` and
+  `set_signals(targets, allow_large_move)`, the second pair of tools, for
+  everything writable that is not an axis: a filter transmission, a source
+  meter's programmed voltage, a mode selector. `move_axes`' allow-list is
+  `_gui_scan_options()["axes"]`, whose movable test needs a `.position` and
+  which only walks one level down, so `filters.transmission` and
+  `keithley2400.inp.voltage` were never reachable through it.
+
+  They get a **second allow-list rather than a wider first one**.
+  `_gui_mcp_settable_paths(root)` walks one root device's
+  `walk_signals(include_lazy=False)`, keeps what has `write_access`, and drops
+  any path that *is* an axis or lives under one. Widening `_movable()` instead
+  would have pushed several hundred `velocity` / `user_offset` /
+  `user_setpoint` entries into the Scan and Macro tabs' axis combos — those
+  read the same list — and made a motor's coordinate system settable by
+  accident. The two lists are disjoint by construction, and each op refuses the
+  other's paths by name with a pointer to the right tool.
+
+  Both request paths share `_gui_mcp_check_number()`, so the axis and signal
+  guards cannot drift apart, and both re-validate inside `_gui_mcp_execute` —
+  a signal is parked and approved through exactly the same gate as a move.
+  Two differences: the `MAX_TRAVEL_DEG` cap is for angles and is skipped, so a
+  signal with no soft limits has no travel cap either (the bargain a limitless
+  axis already makes), and an `enum_strs` signal accepts a **choice by name**
+  or an integral in-range index, nothing else. Values are therefore kept in
+  their own type end to end — `_gui_mcp_value()` passes strings through, and
+  `_gui_mcp_execute` writes the parked value rather than a `float()` of it, or
+  `"Local"` would not survive the round trip.
+
+  `list_signals()` with no argument lists the devices and their signal counts;
+  a name lists that device's signals with class, value, limits, choices and
+  units. It answers **one device at a time** because each value is a
+  channel-access round trip, and reads only where `connected` is true, since a
+  disconnected signal's `.get()` blocks.
+
+#### Connecting a client
+
+The server is **stdio**: the client spawns `id6b-mcp` as a child process and
+talks JSON-RPC over its stdin/stdout. `mcp.run()` at `server.py:662` takes no
+transport argument, so there is no port and nothing is listening.
+
+Locally, that is one entry in the client's config — this is the one in
+`~/.claude.json`, scoped to the project directory:
+
+```json
+"6idb-hkl": {
+  "type": "stdio",
+  "command": "/home/beams/USER6IDB/.conda/envs/6idb-bits/bin/id6b-mcp",
+  "args": [],
+  "env": {}
+}
+```
+
+Two preconditions. **The GUI must be running first** — it writes
+`.id6b-gui-kernel.json` on `start()` and removes it on `shutdown()`, and the
+server has nothing to attach to without it. And **the server's cwd must be
+inside the session's tree**, since `find_pointer()` walks up from it; otherwise
+override with `--connection-file <pointer>` or `ID6B_GUI_KERNEL_FILE`. A
+pointer left behind by a GUI that did not shut down cleanly is refused by name:
+*"points at PID …, which is no longer running."*
+
+**From another machine, run the server over SSH.** Not the ZMQ ports:
+`QtKernelManager` binds `127.0.0.1`, and the three things the server reads
+outside the shell channel — the motor PVs over Channel Access, `.re_md_dict.yml`
+for the scan id, and the pointer file — all assume the beamline host. Carrying
+the *stdio* instead leaves every one of them where it works:
+
+```json
+"6idb-hkl": {
+  "type": "stdio",
+  "command": "ssh",
+  "args": [
+    "-T", "user6idb@reciprocore.xray.aps.anl.gov",
+    "/home/beams/USER6IDB/.conda/envs/6idb-bits/bin/id6b-mcp",
+    "--connection-file", "/home/beams18/USER6IDB/6idb-bits/.id6b-gui-kernel.json"
+  ]
+}
+```
+
+Pass the **pointer** path, not a connection file: the connection file is a
+fresh `/tmp` name on every GUI start, while the pointer path is stable across
+restarts.
+
+Two ways this fails, both in the transport rather than in the server:
+
+- **A password prompt** lands in the protocol stream. Key-based auth only.
+- **Anything a login script prints to stdout** corrupts the JSON-RPC framing —
+  and the account's shell here is tcsh, so `.cshrc`/`.login` are the risk.
+  Check with `ssh -T user6idb@reciprocore true | xxd | head`, which must
+  produce nothing at all. `-T` (no TTY) matters for the same reason.
+
+**Do not tunnel the kernel instead.** It can be made to work — forward the five
+ZMQ ports, copy the connection file, and pass it with `--connection-file`, which
+skips the pid check because `resolve_connection_file()` tells the two file types
+apart by content — but `get_session_status()` then loses both its PV readbacks
+and its scan id, which is precisely the tool that exists for the minutes when a
+scan is blocking everything else. The security argument is the stronger one: the
+connection file carries the kernel's HMAC key, and anyone who reaches those
+ports with it executes arbitrary Python in the live session. **The approval gate
+lives inside `_gui_mcp`; a raw kernel client goes around it entirely.** SSH keeps
+the authentication in front of the process rather than in front of one code
+path.
+
+Proper remote support would be `mcp.run(transport=…)` for streamable HTTP plus a
+bind address, auth and a reverse proxy — worth it for several people driving one
+session, where the SSH wrapper is the right answer for one.
 
 **No collision model.** The soft limits are the IOC's per-axis limits; they say
 nothing about the detector arm meeting the cryostat or the analyzer. The
