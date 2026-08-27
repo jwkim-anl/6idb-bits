@@ -400,10 +400,70 @@ class HklTab(BaseTab):
             ("psi_reference", "ψ reference (h2 k2 l2)"),
             ("beam", "λ (energy)"),
         ):
+            if key == "angles":
+                form.addRow(f"{caption}:", self._build_angles_widget())
+                continue
             label = value_label()
             self._current[key] = label
             form.addRow(f"{caption}:", label)
         return box
+
+    def _build_angles_widget(self):
+        """Two stacked rows for the angles: names above, values below.
+
+        As one line -- ``mu=0.0000  eta=0.0000  …`` -- six axes repeat the
+        name and the ``=`` on every reading and run to roughly twice the
+        width.  A column per axis says each name once and lets the numbers
+        line up under it.
+        """
+        holder = QWidget()
+        self._angle_grid = QGridLayout(holder)
+        self._angle_grid.setContentsMargins(0, 0, 0, 0)
+        self._angle_grid.setHorizontalSpacing(14)
+        self._angle_grid.setVerticalSpacing(0)
+        self._angle_cells = {}
+        self._angle_names = []
+        # Shown until the first reading arrives, and again if the axes ever
+        # come back empty -- an empty grid would silently look like a bug.
+        self._angle_empty = value_label()
+        self._angle_grid.addWidget(self._angle_empty, 0, 0)
+        return holder
+
+    def _set_angles(self, reals):
+        """Fill the angle columns, rebuilding them if the axes changed."""
+        names = [name for name, value in reals.items() if value is not None]
+        if names != self._angle_names:
+            self._angle_names = names
+            for widget in list(self._angle_cells.values()) + [self._angle_empty]:
+                # setParent(None) as well as deleteLater(), the trap
+                # _rebuild_preset_rows documents: a deferred delete leaves the
+                # old widget painting over its former cell until the event
+                # loop gets to it.
+                self._angle_grid.removeWidget(widget)
+                widget.setParent(None)
+                widget.deleteLater()
+            self._angle_cells = {}
+            self._angle_empty = value_label()
+
+            if not names:
+                self._angle_grid.addWidget(self._angle_empty, 0, 0)
+                return
+
+            for column, name in enumerate(names):
+                caption = QLabel(name)
+                caption.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                cell = value_label()
+                cell.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self._angle_grid.addWidget(caption, 0, column)
+                self._angle_grid.addWidget(cell, 1, column)
+                self._angle_cells[name] = cell
+                self._angle_grid.setColumnStretch(column, 0)
+            # Surplus to the right, so the columns stay next to each other
+            # instead of being spread across the group.
+            self._angle_grid.setColumnStretch(len(names), 1)
+
+        for name in names:
+            self._angle_cells[name].setText(f"{reals[name]:.4f}")
 
     def _build_calc_group(self):
         box = QGroupBox("Calculate and move")
@@ -615,9 +675,7 @@ class HklTab(BaseTab):
                 "  ".join(f"{k}={v:.5f}" for k, v in pseudos.items() if v is not None)
             )
         if reals:
-            self._current["angles"].setText(
-                "  ".join(f"{k}={v:.4f}" for k, v in reals.items() if v is not None)
-            )
+            self._set_angles(reals)
         two_theta = data.get("two_theta")
         self._current["two_theta"].setText(
             f"{two_theta:.5f}" if two_theta is not None else PLACEHOLDER
