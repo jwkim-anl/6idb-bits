@@ -164,3 +164,7 @@ from id6_b.utils.experiment_utils import (  # noqa: F401, E402
     experiment_change_sample,
     experiment_setup,
 )
+from id6_b.plans.auto_attenuation import (  # noqa: F401, E402
+    attenuation_setup,
+    auto_atten,
+)

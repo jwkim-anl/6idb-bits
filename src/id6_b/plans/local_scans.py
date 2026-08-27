@@ -31,7 +31,7 @@ from apsbits.core.instrument_init import oregistry
 from apsbits.utils.config_loaders import get_config
 from bluesky.plan_patterns import chunk_outer_product_args
 from bluesky.plan_stubs import abs_set as bps_abs_set
-from bluesky.plan_stubs import move_per_step, mv as bps_mv, rd, trigger_and_read
+from bluesky.plan_stubs import move_per_step, mv as bps_mv, rd
 from bluesky.plans import count as bp_count
 from bluesky.plans import grid_scan as bp_grid_scan
 from bluesky.plans import scan
@@ -46,6 +46,10 @@ from ..callbacks.nexus_data_file_writer import nxwriter
 from ..utils import run_engine as _re_module
 from ..utils.counters_class import counters
 from ..utils.experiment_utils import experiment
+from .auto_attenuation import attenuated_trigger_and_read
+from .auto_attenuation import attenuation_metadata
+from .auto_attenuation import auto_atten
+from .auto_attenuation import one_local_shot
 from .local_preprocessors import configure_counts_decorator, extra_devices_decorator
 
 try:
@@ -105,14 +109,30 @@ def _collect_extras(args):
     if huber_flag:
         extras.append(current_diffractometer())
 
+    # Record the transmission each point was taken at.  Added here, rather
+    # than only on the points that were retaken, so the descriptor is the
+    # same for every point -- and without it the points are on different
+    # scales with nothing to renormalize by.
+    if auto_atten.ready and auto_atten.record:
+        filters = auto_atten.filters
+        if filters not in extras:
+            extras.append(filters)
+
     return extras
 
 
-def one_local_step(detectors, step, pos_cache, take_reading=trigger_and_read):
-    """Per-step function for fixQ scans.
+def one_local_step(
+    detectors, step, pos_cache, take_reading=attenuated_trigger_and_read
+):
+    """Per-step function for fixQ and auto-attenuation scans.
 
     After moving to the requested motor positions, moves the diffractometer
     back to the stored HKL position before reading.
+
+    The default *take_reading* adjusts the filter transmission and retakes
+    the point when the watched channel is outside its accept window; it
+    falls back to ``trigger_and_read`` when automatic attenuation is off,
+    so this is the plain fixQ step in that case.
     """
     devices_to_read = list(step.keys()) + list(detectors)
     yield from move_per_step(step, pos_cache)
@@ -249,6 +269,9 @@ def count(num, time, detectors=None, delay=None, per_shot=None, md=None):
     if detectors is None:
         detectors = _setup_detectors(time > 0)
 
+    if per_shot is None and auto_atten.ready:
+        per_shot = one_local_shot
+
     _master_fullpath, _dets_file_paths, _rel_dets_paths = _setup_paths(detectors)
     _setup_nxwriter(
         experiment.experiment_path, _master_fullpath, _rel_dets_paths
@@ -266,6 +289,7 @@ def count(num, time, detectors=None, delay=None, per_shot=None, md=None):
     )
     for item in detectors:
         _md["hints"]["detectors"].extend(item.hints["fields"])
+    _md.update(attenuation_metadata())
     _md.update(md or {})
 
     @configure_counts_decorator(detectors, time)
@@ -323,8 +347,8 @@ def ascan(
             huber.l: huber.l.get().setpoint,
         }
 
-    if per_step is None:
-        per_step = one_local_step if fixq else None
+    if per_step is None and (fixq or auto_atten.ready):
+        per_step = one_local_step
 
     _master_fullpath, _dets_file_paths, _rel_dets_paths = _setup_paths(detectors)
     _setup_nxwriter(
@@ -343,6 +367,7 @@ def ascan(
     )
     for item in detectors:
         _md["hints"]["detectors"].extend(item.hints["fields"])
+    _md.update(attenuation_metadata())
     _md.update(md or {})
 
     @subs_decorator(nxwriter.receiver)
@@ -446,8 +471,8 @@ def grid_scan(
             huber.l: huber.l.get().setpoint,
         }
 
-    if per_step is None:
-        per_step = one_local_step if fixq else None
+    if per_step is None and (fixq or auto_atten.ready):
+        per_step = one_local_step
 
     _master_fullpath, _dets_file_paths, _rel_dets_paths = _setup_paths(detectors)
     _setup_nxwriter(
@@ -468,6 +493,7 @@ def grid_scan(
     )
     for item in detectors:
         _md["hints"]["detectors"].extend(item.hints["fields"])
+    _md.update(attenuation_metadata())
     _md.update(md or {})
 
     @subs_decorator(nxwriter.receiver)

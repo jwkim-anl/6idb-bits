@@ -25,8 +25,10 @@ import logging
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import QButtonGroup
 from qtpy.QtWidgets import QCheckBox
+from qtpy.QtWidgets import QComboBox
 from qtpy.QtWidgets import QDialog
 from qtpy.QtWidgets import QDialogButtonBox
+from qtpy.QtWidgets import QGridLayout
 from qtpy.QtWidgets import QGroupBox
 from qtpy.QtWidgets import QHBoxLayout
 from qtpy.QtWidgets import QLabel
@@ -56,6 +58,27 @@ ADDABLE_EXPR = "_gui_addable_devices()"
 #: Kinds of the signals belonging to the extra devices.
 EXTRA_KINDS_KEY = "detector_extra_kinds"
 
+#: Automatic attenuation settings (see ``gui/atten_bridge.py``).
+ATTEN_KEY = "detector_attenuation"
+ATTEN_EXPR = "_gui_atten_state()"
+
+#: Caps on the attenuation entry boxes.  Uncapped, a ``QGridLayout`` column
+#: with a stretch factor hands its widget the whole surplus, so a box holding
+#: ``3000`` (39 px of glyphs) was measured at 830 px and the channel combos at
+#: 1771 -- the trap ``tabs/scan.py`` documents.  The numeric cap matches
+#: ``LATTICE_WIDTH`` in the HKL tab so the two read alike; the combo cap fits
+#: the longest real channel name, ``lambda250k_stats5_array_counter`` at
+#: 272 px of glyphs, since the point of the combo is to show which one is
+#: selected.
+ATTEN_VALUE_WIDTH = 80
+ATTEN_NAME_WIDTH = 300
+
+#: Ceiling on the width the channel tree may demand (see
+#: ``DetectorsTab._fit_tree_width``).  Past this the tab would be pushed wider
+#: than the window, which moves the horizontal scrollbar out to the tab rather
+#: than getting rid of it.
+TREE_MAX_MINIMUM = 1200
+
 #: Offered in the order a user thinks about them, one tree column each.
 KIND_CHOICES = ["hinted", "normal", "config", "omitted"]
 
@@ -71,10 +94,31 @@ KIND_TOOLTIPS = {
     ),
 }
 
+#: Why an Apply button is disabled, on every Apply that waits for idle.
+_WAITING_FOR_IDLE = "Waiting for the kernel to go idle — a scan is running."
+
 #: Column 0 is the name, column 1 a free-text detail (the PV prefix on a device
 #: row, an unrecognised kind on a channel row), then one column per kind.
 DETAIL_COLUMN = 1
 FIRST_KIND_COLUMN = 2
+
+
+def _half_width(widget):
+    """Give *widget* the left half of its row and leave the right half empty.
+
+    A share of the width rather than a pixel cap, so it tracks the window
+    instead of going wrong on the next monitor.
+
+    Half is the *preference*, not a limit: a widget whose minimum width is
+    larger wins, and ``DetectorsTab._fit_tree_width`` sets exactly such a
+    minimum from the populated columns.  So the group is half the window when
+    half is enough to show everything, and grows past half instead of
+    scrolling when it is not.
+    """
+    row = QHBoxLayout()
+    row.addWidget(widget, 1)
+    row.addStretch(1)
+    return row
 
 
 def _centered(widget):
@@ -141,6 +185,11 @@ class DetectorsTab(BaseTab):
         self._editors = {}  # (device, channel) -> _KindRow
         self._extra_editors = {}  # same, for extra-device signals
         self._kernel_idle = False
+        # The attenuation fields are filled from the kernel once and then left
+        # alone.  They are on the 1 Hz poll like everything else here, and
+        # rewriting them on every reply would pull the text out from under
+        # whoever is typing in them.
+        self._atten_loaded = False
 
         self._tree = QTreeWidget()
         self._tree.setColumnCount(FIRST_KIND_COLUMN + len(KIND_CHOICES))
@@ -176,22 +225,138 @@ class DetectorsTab(BaseTab):
         channels_layout.addWidget(self._tree)
         channels_layout.addLayout(buttons)
 
+        # Kept so _fit_tree_width can hold all three to one width: the tree
+        # needs the most, and a stack of group boxes with ragged right edges
+        # reads as a mistake.
+        self._groups = [
+            channels,
+            self._build_extras_group(),
+            self._build_attenuation_group(),
+        ]
         layout = QVBoxLayout(self)
-        layout.addWidget(channels, 1)
-        layout.addWidget(self._build_extras_group())
+        layout.addLayout(_half_width(self._groups[0]), 1)
+        for group in self._groups[1:]:
+            layout.addLayout(_half_width(group))
+
+    def _build_attenuation_group(self):
+        """Threshold-driven filter transmission control during scans.
+
+        Belongs here rather than on the Scan tab: like the ``Kind`` tree above
+        it is kernel-side configuration that changes what *future* scans do,
+        and the channel it watches is one of the detector channels listed
+        above it.
+        """
+        box = QGroupBox("Automatic attenuation")
+        outer = QVBoxLayout(box)
+        # Wrapped, or the label's one-line minimumSizeHint becomes the group's
+        # minimum width and no share-of-the-width layout can shrink it.
+        caption = QLabel(
+            "Retakes a scan point at a different filter transmission "
+            "until the watched channel is inside the window. Rejected "
+            "readings are discarded, so only the accepted one is "
+            "recorded. A point that cannot be brought into range is "
+            "accepted as it stands."
+        )
+        caption.setWordWrap(True)
+        outer.addWidget(caption)
+
+        self._atten_enabled = QCheckBox("Arm automatic attenuation")
+        self._atten_enabled.setToolTip(
+            "While this is off the scans behave exactly as they did before "
+            "the feature existed. Turning it off does not put the filters "
+            "back — use filters.allout() for that."
+        )
+        outer.addWidget(self._atten_enabled)
+
+        grid = QGridLayout()
+        # Every field is capped (see ATTEN_VALUE_WIDTH) and the surplus goes
+        # to an empty column on the right.  Giving the *field* columns the
+        # stretch instead, as this first did, handed a box holding "3000" the
+        # whole 830 px the row had spare.
+        for column in range(4):
+            grid.setColumnStretch(column, 0)
+        grid.setColumnStretch(4, 1)
+
+        self._atten_signal = QComboBox()
+        self._atten_signal.setEditable(True)
+        self._atten_signal.setToolTip(
+            "Data key to watch. For the Lambda 250K, stats5 is fed the whole "
+            "frame, so lambda250k_stats5_max_value is the brightest pixel on "
+            "the detector; stats1–4 are per-ROI."
+        )
+        self._atten_signal.setMaximumWidth(ATTEN_NAME_WIDTH)
+        grid.addWidget(QLabel("Watch channel"), 0, 0)
+        # Spans into the trailing stretch column, so ATTEN_NAME_WIDTH is what
+        # limits it.  Spanning only the field columns pinned it to their
+        # combined 270 px and clipped the longest channel name.
+        grid.addWidget(self._atten_signal, 0, 1, 1, 4)
+
+        self._atten_low = QLineEdit()
+        self._atten_high = QLineEdit()
+        grid.addWidget(QLabel("Accept above"), 1, 0)
+        grid.addWidget(self._atten_low, 1, 1)
+        grid.addWidget(QLabel("and below"), 1, 2)
+        grid.addWidget(self._atten_high, 1, 3)
+
+        self._atten_factor = QLineEdit()
+        self._atten_factor.setToolTip(
+            "Transmission step. A number steps by exactly that, so 10 walks "
+            "1 → 0.1 → 0.01. 'auto' works each step out from how far off the "
+            "reading is, usually reaching the window in one step."
+        )
+        self._atten_tries = QLineEdit()
+        self._atten_tries.setToolTip(
+            "Adjustments allowed per point before the point is accepted as it stands."
+        )
+        grid.addWidget(QLabel("Step factor"), 2, 0)
+        grid.addWidget(self._atten_factor, 2, 1)
+        grid.addWidget(QLabel("Max retakes"), 2, 2)
+        grid.addWidget(self._atten_tries, 2, 3)
+
+        for field in (
+            self._atten_low,
+            self._atten_high,
+            self._atten_factor,
+            self._atten_tries,
+        ):
+            field.setMaximumWidth(ATTEN_VALUE_WIDTH)
+
+        self._atten_counter = QComboBox()
+        self._atten_counter.setEditable(True)
+        self._atten_counter.setToolTip(
+            "Array counter confirming the detector plugin processed the "
+            "frame just taken, e.g. lambda250k_stats5_array_counter. Set it "
+            "for an area detector: plugin callbacks are asynchronous and a "
+            "stale reading steers the adjustment the wrong way."
+        )
+        self._atten_counter.setMaximumWidth(ATTEN_NAME_WIDTH)
+        grid.addWidget(QLabel("Frame counter"), 3, 0)
+        grid.addWidget(self._atten_counter, 3, 1, 1, 4)
+
+        outer.addLayout(grid)
+
+        row = QHBoxLayout()
+        self._atten_status = QLabel("Waiting for the session…")
+        row.addWidget(self._atten_status, 1)
+        self._atten_apply = QPushButton("Apply")
+        self._atten_apply.clicked.connect(self._apply_attenuation)
+        self._atten_apply.setEnabled(False)
+        row.addWidget(self._atten_apply)
+        outer.addLayout(row)
+        return box
 
     def _build_extras_group(self):
         """Devices recorded alongside the detectors at every scan point."""
         box = QGroupBox("Also record during scans (extra devices)")
         outer = QVBoxLayout(box)
-        outer.addWidget(
-            QLabel(
-                "Any EPICS device — temperature, capacitance, a source meter — "
-                "can be recorded here. Extras skip the count-time setup, so "
-                "they need no preset_monitor. Tick them in the Scan plot tab "
-                "to plot them."
-            )
+        caption = QLabel(
+            "Any EPICS device — temperature, capacitance, a source meter — "
+            "can be recorded here. Extras skip the count-time setup, so "
+            "they need no preset_monitor. Tick them in the Scan plot tab "
+            "to plot them."
         )
+        caption.setWordWrap(True)
+        outer.addWidget(caption)
         self._extras_list = QListWidget()
         self._extras_list.setMaximumHeight(110)
         outer.addWidget(self._extras_list)
@@ -224,6 +389,7 @@ class DetectorsTab(BaseTab):
                 KINDS_KEY: KINDS_EXPR,
                 EXTRAS_KEY: EXTRAS_EXPR,
                 EXTRA_KINDS_KEY: f"_gui_extra_kinds({show_omitted!r})",
+                ATTEN_KEY: ATTEN_EXPR,
             }
         )
 
@@ -253,6 +419,113 @@ class DetectorsTab(BaseTab):
         addable = values.get(ADDABLE_KEY)
         if isinstance(addable, list):
             self._show_add_dialog(addable)
+        attenuation = values.get(ATTEN_KEY)
+        if isinstance(attenuation, dict):
+            self._show_attenuation(attenuation)
+
+    # -- automatic attenuation ---------------------------------------------
+
+    def _show_attenuation(self, state):
+        """Render the attenuation settings, or the kernel's refusal."""
+        if state.get("available") is False:
+            # The module itself is missing.  Distinct from a refused apply,
+            # and it must not latch _atten_loaded: this can arrive before the
+            # session is up, and the fields would then never be filled in.
+            self._atten_status.setText(
+                str(state.get("error") or "Automatic attenuation is not available.")
+            )
+            self._atten_apply.setEnabled(False)
+            return
+
+        error = state.get("error")
+        if error:
+            # A refused apply.  Leave the fields as typed so the mistake can
+            # be corrected in place instead of reverting to the kernel's
+            # values, which is what _apply_attenuation cleared the flag for.
+            self._atten_loaded = True
+            self._atten_status.setText(str(error))
+            self._update_apply_enabled()
+            return
+
+        # Filter to str before it reaches addItems.  A reply arrives as a repr
+        # rendered by IPython's pretty printer, which truncates a sequence
+        # past 1000 items by writing a literal `...` into it -- literal_eval
+        # then yields a list with an Ellipsis in the middle, and addItems
+        # raises TypeError.  That exception used to abort the whole process
+        # (see MainWindow._on_kernel_values), taking the live session with it,
+        # so this stays defensive even though the kernel side now caps the
+        # lists well below the limit.
+        def _names(key):
+            return [name for name in (state.get(key) or []) if isinstance(name, str)]
+
+        for combo, key in (
+            (self._atten_signal, "channels"),
+            (self._atten_counter, "counter_channels"),
+        ):
+            names = _names(key)
+            # Refresh the offered names without disturbing what is typed:
+            # setCurrentText on an editable combo only writes the line edit.
+            typed = combo.currentText()
+            if [combo.itemText(i) for i in range(combo.count())] != names:
+                combo.blockSignals(True)
+                combo.clear()
+                combo.addItems(names)
+                combo.setCurrentText(typed)
+                combo.blockSignals(False)
+
+        if not self._atten_loaded:
+            self._atten_loaded = True
+            self._atten_enabled.setChecked(bool(state.get("enabled")))
+            self._atten_signal.setCurrentText(state.get("signal") or "")
+            self._atten_counter.setCurrentText(state.get("counter_signal") or "")
+            self._atten_factor.setText(str(state.get("factor") or "auto"))
+            for widget, key in (
+                (self._atten_low, "low"),
+                (self._atten_high, "high"),
+                (self._atten_tries, "max_tries"),
+            ):
+                value = state.get(key)
+                widget.setText("" if value is None else f"{value:g}")
+
+        transmission = state.get("transmission")
+        where = "" if transmission is None else f"  Transmission {transmission:g}."
+        if state.get("ready"):
+            self._atten_status.setText(f"Armed, watching {state['signal']}.{where}")
+        elif state.get("enabled"):
+            self._atten_status.setText(f"Enabled but not configured.{where}")
+        else:
+            self._atten_status.setText(f"Off.{where}")
+        self._update_apply_enabled()
+
+    def _apply_attenuation(self):
+        """Send the on-screen settings to the kernel, then re-read them."""
+        values = {
+            "enabled": self._atten_enabled.isChecked(),
+            "signal": self._atten_signal.currentText().strip(),
+            "counter_signal": self._atten_counter.currentText().strip(),
+            "factor": self._atten_factor.text().strip() or "auto",
+        }
+        for key, widget in (
+            ("low", self._atten_low),
+            ("high", self._atten_high),
+            ("max_tries", self._atten_tries),
+        ):
+            text = widget.text().strip()
+            if text:
+                values[key] = text
+
+        # Sent as an *expression* rather than through execute_once, because
+        # _gui_atten_set returns the new state -- or a dict with `error` when
+        # it refuses.  execute_once discards the value, which would make a
+        # rejected setting look as though it had been applied.  The reply
+        # lands under the same key as the ordinary read, so one code path
+        # renders both.
+        if self.poller is None:
+            self._atten_status.setText("Could not reach the kernel.")
+            return
+        self._atten_loaded = False
+        self.request({ATTEN_KEY: f"_gui_atten_set({values!r})"})
+        self._atten_status.setText("Applying…")
 
     # -- view -------------------------------------------------------------
 
@@ -275,7 +548,44 @@ class DetectorsTab(BaseTab):
             # Keep the radio columns as narrow as their headers, so the channel
             # names get the width.
             self._tree.resizeColumnToContents(FIRST_KIND_COLUMN + offset)
+        self._fit_tree_width()
         self._update_apply_enabled()
+
+    def _fit_tree_width(self):
+        """Ask for at least the width the columns actually need.
+
+        The group is laid out as a share of the window (see
+        :func:`_half_width`), which on its own let the tree fall below its
+        content and scroll sideways.  A minimum computed from the *populated*
+        columns is what stops that: it follows the channel names actually
+        present rather than a guess, and it still lets the group take only
+        half when half is more than enough.
+
+        Capped at :data:`TREE_MAX_MINIMUM` so an unusually long name cannot
+        push the tab wider than the window and move the scrollbar rather than
+        remove it.
+        """
+        header = self._tree.header()
+        columns = sum(
+            header.sectionSize(index) for index in range(self._tree.columnCount())
+        )
+        if not columns:
+            return
+        # Frame, and the vertical scrollbar that appears once the list is
+        # long -- without its width the last column is what gets clipped.
+        chrome = (
+            2 * self._tree.frameWidth()
+            + self._tree.verticalScrollBar().sizeHint().width()
+        )
+        wanted = min(columns + chrome, TREE_MAX_MINIMUM)
+        self._tree.setMinimumWidth(wanted)
+        # Match the other two to the tree's group.  Ask Qt for that group's
+        # own minimum rather than adding up margins: the group box contributes
+        # a frame as well as its layout's margins, and hand-summing them left
+        # the edges 6 px out of line.
+        group_width = self._groups[0].minimumSizeHint().width()
+        for group in self._groups[1:]:
+            group.setMinimumWidth(group_width)
 
     def _add_device_nodes(self, rows, editors, suffix):
         """Add one tree node per device, with Kind radios for each channel."""
@@ -323,6 +633,11 @@ class DetectorsTab(BaseTab):
         self._apply_button.setEnabled(bool(changes) and self._kernel_idle)
         self._add_extra_button.setEnabled(self._kernel_idle)
         self._remove_extra_button.setEnabled(self._kernel_idle)
+        waiting = "" if self._kernel_idle else _WAITING_FOR_IDLE
+        # Arming mid-scan would change the retake behaviour of a scan already
+        # under way, so this waits for idle like everything else here.
+        self._atten_apply.setEnabled(self._kernel_idle)
+        self._atten_apply.setToolTip(waiting)
         if not self._rows:
             return
         if not changes:

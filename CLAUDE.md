@@ -69,7 +69,7 @@ queue-monitor &                           # GUI client
 6. `RE(make_devices(file="devices_aps_only.yml"))` — only when on APS subnet
 7. Call `default_settings()` on every `oregistry` device that defines one — `make_devices()` does **not** do this. Required for `LocalScalerCH`: without it the unnamed scaler channels keep `Kind.hinted|normal` and their empty EPICS names break the event descriptor. Failures are logged per-device rather than aborting startup. Runs before the baseline stream is built so baseline devices are configured before their first read.
 8. `setup_baseline_stream(sd, oregistry)` — adds devices labeled `"baseline"` to the supplemental data stream
-9. Import `counters` singleton, `local_scans` plans and the `center_maximum` plans (`cen`, `com`, `maxi`, `mini` and the `*2` aliases) into the session namespace
+9. Import `counters` singleton, `local_scans` plans, the `center_maximum` plans (`cen`, `com`, `maxi`, `mini` and the `*2` aliases) and `attenuation_setup`/`auto_atten` into the session namespace
 
 ### Device configuration (`src/id6_b/configs/devices.yml`)
 
@@ -104,7 +104,7 @@ The `sl1`–`sl3` entries show the per-axis `class:` hook of `mb_creator`: the f
 - **`monochromator.py`** — `MonoDevice` (PseudoPositioner, prefix `6ida1:`): pseudo axis `energy` (keV, 2.6–32) with real motors `th`→`m8`, `y2`→`m11`, plus additional `thf2`→`m13`, `chi2`→`m15`. Kohzu IOC crystal parameter records (`crystal_2d`, `y_offset`, `crystal_h/k/l/a`, `crystal_type`). `pzt_thf2` is commented out pending PV confirmation. The Kohzu IOC also provides computed readback PVs `6ida1:BraggERdbkAO` (energy, keV) and `6ida1:BraggLambdaRdbkAO` (wavelength, Å) used by the hklpy2 diffractometers.
 - **`energy_device.py`** — `EnergySignal` (ophyd `Signal`): coordinates beamline energy by moving `mono.energy` and any device in `oregistry` labeled `"track_energy"` whose `tracking` flag is enabled. Supports optional `energy_offset` per tracking device. Feedback hooks present but must be adapted to 6-ID-B's feedback system before enabling. `mono` must be created before `energy` in `devices.yml`.
 - **`scaler.py`** — `LocalScalerCH` (prefix `6idb1:scaler1`): extends `ScalerCH` with `preset_monitor` (seconds ↔ clock-count conversion for the time channel), `freq` component, `monitor` setter (selects monitor and adjusts gates), and `select_read/plot_channels()`. Also `plot_signals` (channel label → signal), the companion to `plot_options` used by the GUI's Detectors tab to read and set each channel's `Kind`. `default_settings()` is called by the `default_settings` loop in `startup.py` (step 7) — **not** by `make_devices()`, which has no such hook. Without it `scaler.channels.chan32` keeps its default `Kind.hinted|normal` and its empty EPICS name reaches the descriptor, raising `ValidationError: '' does not match any of the regexes` on any scan that reads the scaler. `select_plot_channels()` iterates all channels: unnamed ones get `Kind.omitted` (prevents empty-string keys in `data_keys`), named non-selected get `Kind.normal`, selected get `Kind.hinted`.
-- **`filters.py`** — `FilterBank` (prefix `6idb1:filter:`): `transmission` (readback + `TransmissionSetpoint` write PV), `allin()`/`allout()` helpers, and a read-only `energy` `AttributeSignal` that reports `energy_beamline` or `energy_local` according to `energy_select` ("Mono"/"Local"). Ported from `bluesky/instrument/devices/filter.py`; renamed from `filter` so it no longer shadows the Python builtin.
+- **`filters.py`** — `FilterBank` (prefix `6idb1:filter:`): `transmission` (readback + `TransmissionSetpoint` write PV), `allin()`/`allout()` helpers, and a read-only `energy` `AttributeSignal` that reports `energy_beamline` or `energy_local` according to `energy_select` ("Mono"/"Local"). Ported from `bluesky/instrument/devices/filter.py`; renamed from `filter` so it no longer shadows the Python builtin. **Do not `mv()` the transmission** — put completion is off and the readback is the transmission the IOC realized rather than the one requested, so `EpicsSignal.set` polls forever for a match that never comes; see the `_WriteOnly` shim under `plans/auto_attenuation.py`.
 - **`keithley.py`** — `Keithley2400` (prefix `6idb1:K24K:`): `inp` (programmed voltage/current + ranges) and `meas` (sensed voltage/current, `sense_function`) sub-devices, plus `source_function`. Not labeled `"baseline"` — `meas.voltage` reads the EPICS UDF sentinel `9.91e37` whenever the sense function is not voltage. Ported from `bluesky/instrument/devices/keith2400.py`.
 - **`lakeshore_controllers.py`** — `LS340Device` for Lakeshore 340 temperature controller (currently disabled in devices.yml).
 - **`lambda_detector.py`** — `Lambda250kDetector` area detector with HDF5, ROI (1–4), and stats (1–5) plugins. **Enabled** in `devices.yml` with labels `["detector", "detectors"]` (no `"baseline"` — area detectors require `stage()` before reading and must not be in the baseline stream). Implements the `CountersClass` interface: `plot_options` returns `["Stats1"…"Stats5"]`; `select_plot(channels)` sets `Kind.hinted` on selected stats; `plot_signals` maps those names to the `statsN.total` signals for the GUI's Detectors tab. Call `configure_lambda(lambda250k)` after enabling to wire up ROI/stats ports and set default kinds.
@@ -179,6 +179,17 @@ experiment_setup()
   - `extra_devices_decorator(extras)` — temporarily demotes extra devices from `Kind.hinted` to `Kind.normal` so they don't appear in BEC plots
 - **`local_scans.py`** — Main user-facing scan plans. All plans configure the NeXus writer, collect extra devices (undulator energies when scanning energy, diffractometer when scanning HKL), and write rich run-start metadata. Available plans: `count`, `ascan`, `lup`, `grid_scan`, `rel_grid_scan`, `mv`, `mvr`, `abs_set`. All support `fixq=True` to hold HKL position constant (useful for energy scans). No dichro, lock-in, phase plate, or qxscan support.
 
+  There are now **two** things that can put a custom step on a scan, and they
+  compose: `fixq` needs a `per_step` (`one_local_step`, which moves back to the
+  stored hkl before reading), and `auto_attenuation` needs a `take_reading`
+  (which retakes the point at a different transmission). They are separate
+  hooks precisely so neither has to know about the other — `one_local_step`'s
+  `take_reading` default is `attenuated_trigger_and_read`, which falls through
+  to `trigger_and_read` when attenuation is off. So the `per_step` selection in
+  `ascan`/`grid_scan` is `if per_step is None and (fixq or auto_atten.ready)`,
+  and `count` — which has no `per_step` — gets `one_local_shot` as its
+  `per_shot` instead.
+
 ```python
 # One-time setup per session:
 experiment_setup("/nsls2/data/6idb/2024-1/user", sample="Fe3O4", base_name="scan")
@@ -190,6 +201,99 @@ RE(lup(sample_x, -0.5, 0.5, 51, 1.0))         # relative scan (returns to start)
 RE(grid_scan(sample_y, -1, 1, 11, sample_x, -1, 1, 11, 1.0))
 RE(ascan(energy, 7.1, 7.15, 51, 1.0, fixq=True))  # hold HKL during energy scan
 ```
+
+- **`auto_attenuation.py`** — threshold-driven filter transmission control.
+  Watches one detector channel at each scan point; above `high` the filters
+  close a step and the point is retaken, below `low` they open a step. A point
+  that cannot be brought into range is accepted as it stands and the scan moves
+  on — covering all three dead ends: already at `max_transmission` and still
+  too dim, already at `min_transmission` and still too bright, and the IOC
+  unable to realize a further step. **Off until `attenuation_setup()` is
+  called**, and while off the plans behave exactly as they did before it
+  existed (`auto_atten.ready` is False → `per_step` stays `None`,
+  `_collect_extras` adds nothing, `one_local_step` falls through).
+
+```python
+attenuation_setup(
+    signal=lambda250k.stats5.max_value,          # brightest pixel, whole frame
+    low=200, high=3000,
+    counter_signal=lambda250k.stats5.array_counter,
+    factor=10,                                    # or AUTO (default): calculated
+)
+auto_atten.enabled = False                        # off, settings kept
+```
+
+  **Rejected readings are `drop`ped, not saved**, which is the whole reason
+  this is a `take_reading` hook built from `create`/`read`/`drop`/`save` rather
+  than a loop around `trigger_and_read`: the latter saves the event before
+  anyone can look at it, so every rejected point would land in the primary
+  stream, spiking the scan plot and poisoning `cen()`. The decision is taken
+  *inside* the bundle but from the reading alone — `save()` or `drop()` first,
+  move the filters afterwards.
+
+  **The transmission is recorded at every point.** `_collect_extras` appends
+  the filter bank when the mechanism is armed, so the descriptor is identical
+  for every point (not just the retaken ones) and the events carry the
+  transmission they were taken at. Without it the points are on different
+  scales with nothing to renormalize by. Nothing divides by it automatically —
+  that is still the analysis's job.
+
+  **`mv` on the transmission would deadlock the RunEngine**, hence the
+  `_WriteOnly` shim. `FilterBank.transmission` is an `EpicsSignal` with a
+  separate `write_pv` and no `put_complete`, so `EpicsSignal.set` falls through
+  to `Signal._set_and_wait`, which polls the *readback* until it equals the
+  setpoint — and `EpicsSignalBase.__default_write_timeout` is `None`, "wait
+  forever". The readback is the transmission the IOC actually realized out of a
+  discrete absorber set, which generally is not what was asked for, so the
+  first unrealizable step would hang the scan — precisely the case this module
+  exists to handle. The shim puts and reports done, leaving "did it get there"
+  to the explicit re-read after `settle`, which is also what drives the
+  stuck-filter detection. `put_complete=True` on the component would be the
+  tidier fix and would help every other caller, but it depends on the IOC
+  supporting put completion on that PV and wants testing against the real
+  filter bank first.
+
+  Three more details worth keeping:
+  - **`counter_signal` is not optional in practice for an area detector.** AD
+    plugin callbacks are asynchronous, and the only thing otherwise making the
+    stats match the frame just taken is `MySingleTrigger._acquire_changed`
+    sleeping `delay_time` (0.1 s). A stale value is a cosmetic blemish on an
+    ordinary scan, but here it *drives a decision* and can send the loop the
+    wrong way. `_wait_for_new_frame` watches the plugin's `array_counter` and
+    warns rather than hanging if it never advances.
+  - **`factor` is the step size, and `AUTO` is the default.** A number
+    divides/multiplies the transmission by exactly that each adjustment, so
+    `factor=10` walks 1 → 0.1 → 0.01; `AUTO` works each step out from how far
+    off the reading is and lands inside the window in one step when the
+    signal is near-linear in transmission (2 exposures against 7 for
+    `factor=10` from 1e9). A fixed step is more predictable when the response
+    is *not* linear — dead time, which is often exactly why you are
+    attenuating. `attenuation_setup` uses an `_UNSET` sentinel rather than
+    `None` for "argument not given", so `factor=None` can mean AUTO instead
+    of "leave the current setting alone"; without that the calculated mode
+    was unreachable through the setup macro.
+  - **`move_timeout` is what makes the retake loop actually iterate.** The
+    loop keeps adjusting until the reading is inside the window, and the only
+    early exits are `max_tries` and a filter bank that cannot step further.
+    Deciding "cannot step further" from a blind `settle` sleep conflates it
+    with "has not caught up yet": a filter bank slower than `settle` looks
+    stuck on the first adjustment, so the point is accepted still far out of
+    range after a single retake. `_wait_for_transmission` instead polls the
+    readback until it *moves*, and only calls it stuck once `move_timeout`
+    expires. `settle` is now a minimum dwell, not the whole wait.
+  - **`attenuation_setup` is atomic.** The rules are about combinations
+    (`low` against `high`, `min` against `max`), so validation has to run
+    after the writes — which means a refusal would otherwise leave half the
+    new settings in place, and a rejected `low`/`high` pair would stay behind
+    to fail every later call, *including the one trying to correct it*. It
+    snapshots `__dict__`, applies, validates, and rolls back on any
+    exception.
+  - **A hot pixel defeats the whole thing.** `stats5.max_value` is by
+    definition the single worst pixel on the detector, and a stuck-high one
+    makes every point read "too bright", so the loop attenuates to
+    `min_transmission` and moves on — a whole scan quietly attenuated to
+    nothing. Take a blank frame and check `max_value` is at the noise floor
+    before arming it.
 
 - **`center_maximum.py`** — `cen`, `com`, `maxi`, `mini` (plus POLAR's `cen2`/`maxi2`/`mini2` aliases): move one positioner onto a feature of the **last** scan, so the alignment loop is a plan rather than a copy-and-paste of the number BEC printed:
 
@@ -811,6 +915,26 @@ def align():
   mutation and a read of the same state can share a batch and the read may be
   evaluated first, showing stale values.
 
+  The tab also carries the **Automatic attenuation** group — watched channel,
+  accept window, step factor, max retakes and frame counter, with an Apply
+  gated on kernel idle. It belongs here rather than on the Scan tab for the
+  same reason the `Kind` tree does: it is kernel-side configuration that
+  changes what *future* scans do, and the channel it watches is one of the
+  detector channels listed directly above it.
+
+  Two details differ from the rest of the tab. The Apply goes out as a polled
+  **expression**, not through `execute_once()`, because `_gui_atten_set`
+  *returns* the new state — or a dict with `error` when it refuses — and
+  `execute_once` discards the value, which would make a rejected setting look
+  as though it had been applied; the reply lands under the same key as the
+  ordinary read, so one code path renders both. And the value widgets are
+  filled from the kernel **once** (`_atten_loaded`), because they sit on the
+  1 Hz poll and rewriting them every reply would pull the text out from under
+  whoever is typing. `_show_attenuation` separates "module missing"
+  (`available: False`) from "apply refused" (`error` alone): only the latter
+  latches `_atten_loaded`, since the former can arrive before the session is
+  up and would otherwise stop the fields ever being populated.
+
   Extra devices get `Kind` control too, as `<name>   (extra)` nodes in the same
   tree. They have no `plot_signals`, so their channels come from
   `walk_signals(include_lazy=False)` and are set by dotted attribute path
@@ -820,6 +944,41 @@ def align():
   motor bundle they dominate (53 of `sl1` + `filters`' 105). Setting an extra to
   `omitted` auto-ticks that checkbox, since the row would otherwise be filtered
   out of the next listing and the change could not be undone.
+- **`atten_bridge.py`** — `ATTEN_HELPERS_CODE`, the kernel-side
+  `_gui_atten_state()` / `_gui_atten_set()` for automatic attenuation,
+  appended to the bootstrap cell next to the HKL and MCP helper strings. It
+  lives in its own module because it serves **two** callers — the Detectors
+  tab and the MCP dispatcher — exactly as `hkl_bridge.py` serves the HKL tab
+  and the hkl ops. Both go through
+  `plans.auto_attenuation.attenuation_setup`, so there is no second copy of
+  the validation rules; the two `_gui_mcp_atten_*` wrappers at the bottom
+  exist only to absorb the device argument `_gui_mcp_ops()` gives every op.
+
+  `_gui_atten_channels()` builds the watch-channel list from
+  `walk_signals(include_lazy=False)` over `counters.detectors`, keeping only
+  what is read at every point — the test is `kind & Kind.normal`, since
+  `Kind` is a flag and `hinted` includes `normal`. A `config` signal is
+  recorded once per descriptor rather than per event, so it can never be what
+  a per-point threshold watches.
+
+  **That filter is load-bearing, not tidiness.** A reply comes back through
+  `user_expressions` as a repr rendered by IPython's pretty printer, which
+  truncates a sequence past `MAX_SEQ_LENGTH` (1000) by writing a literal
+  `...` into it; `ast.literal_eval` then hands the GUI a list with an
+  `Ellipsis` in the middle, and `QComboBox.addItems` raises `TypeError`. An
+  unfiltered walk of `lambda250k` is over 2000 signals, so pressing Reload
+  crashed the GUI and took the kernel with it. The kind filter cuts that to
+  ~15, `_GUI_ATTEN_MAX_NAMES` caps it at 300 as a backstop, and
+  `_show_attenuation` drops non-`str` entries before they reach `addItems` —
+  three layers, because the failure mode was losing a live session.
+
+  `_gui_atten_counter_channels()` is a **separate** list, matched on a
+  trailing `array_counter`: a plugin counter is usually `config` kind, so it
+  is filtered out of the watch list, but the retake loop reads it directly
+  with `rd()`, for which kind is irrelevant. `_gui_atten_find_signal()`
+  searches every signal for the same reason, and resolves a data key back to
+  the signal *object* the loop needs.
+
 - **`tabs/devices.py`** — `DevicesTab`, a sortable/filterable table of
   `oregistry.root_devices` (name, class, prefix, labels, connected). Uses
   root devices, not `all_devices`, which also contains every sub-component
@@ -1192,6 +1351,24 @@ Four layers, split so the middle two are testable before the SDK exists:
   | `list_axes()` / `read_axes(axes)` | positions and soft limits |
   | `get_counters()` / `get_last_scan()` | selection, monitor, peak statistics |
   | `get_session_status()` | kernel-free: busy flag, scan id, readbacks over CA |
+
+  **Automatic attenuation is two more tools** — `get_attenuation()` and
+  `set_attenuation(values)` — backed by `gui/atten_bridge.py`. `get_` is in
+  `READ_OPS`, so a model polling it leaves nothing in the console; its
+  `channels` list is the allow-list `signal` and `counter_signal` must be
+  chosen from, and it has to be read first because those keys depend on which
+  detectors the operator selected and cannot be guessed.
+
+  `set_attenuation` is **mutating but not parked for approval**, which is a
+  deliberate line. It moves nothing itself: it has the same standing as
+  `set_mode` or `set_fixed_angles`, which decide where a later approved move
+  actually goes and are likewise ungated — and are the more dangerous of the
+  two. The filters do move once it is armed, but only inside a scan the
+  operator has already approved, the setting shows in the Detectors tab and
+  in every run's metadata, and each adjustment prints to the console. It
+  still gets the `[LLM]` report line every mutating op gets. If that trade
+  ever looks wrong, moving it behind the gate is one edit: change its entry
+  in `_gui_mcp_ops()` to a `_gui_mcp_request_*` wrapper.
 
   Their descriptions carry the gate the same way: that a move **returns before
   it happens**, that the answer is "awaiting approval", that the model should

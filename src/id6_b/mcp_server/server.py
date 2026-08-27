@@ -555,6 +555,74 @@ def _add_tools(mcp, session):
         return session_call("get_counters")
 
     @mcp.tool()
+    def get_attenuation() -> dict:
+        """Report the automatic-attenuation settings.
+
+        Automatic attenuation watches one detector channel at every scan
+        point and changes the filter transmission until the reading is inside
+        an accept window, retaking the point each time.  Readings outside the
+        window are discarded, so only the accepted one is recorded.
+
+        Returns whether it is armed (``ready``), the watched ``signal``, the
+        ``low``/``high`` window, the step ``factor``, the current filter
+        ``transmission``, and ``channels`` -- the data keys of the selected
+        detectors, which is the list ``signal`` and ``counter_signal`` must be
+        chosen from.
+
+        Call this before set_attenuation: the channel names depend on which
+        detectors the operator has selected, so they cannot be guessed.
+        """
+        return session_call("get_attenuation")
+
+    @mcp.tool()
+    def set_attenuation(values: dict) -> dict:
+        """Configure automatic attenuation.  Nothing moves now.
+
+        *values* maps setting name to value; anything left out keeps what it
+        has.  Unlike a move or a scan this is **not** parked for approval --
+        it changes a setting, the way set_mode does, and the filters only move
+        later, inside a scan the operator has approved.  Tell the operator
+        what you armed and why; they can see and change it in the GUI's
+        Detectors tab.
+
+        Settings:
+
+        - ``signal`` -- data key to watch, from ``channels`` in
+          get_attenuation.  For the Lambda 250K,
+          ``"lambda250k_stats5_max_value"`` is the brightest pixel on the
+          whole detector (stats5 is fed the full frame; stats1-4 are per-ROI).
+        - ``low``, ``high`` -- the accept window, in the detector's units.
+          Above *high* the filters close a step, below *low* they open one,
+          and the point is retaken until it is inside or the tries run out.
+        - ``factor`` -- the transmission step.  A number divides/multiplies
+          the transmission by exactly that, so 10 walks 1 -> 0.1 -> 0.01.
+          ``"auto"`` works each step out from how far off the reading is and
+          usually lands inside the window in one step; prefer it unless the
+          detector response is not linear in transmission.
+        - ``max_tries`` -- adjustments allowed per point before the point is
+          accepted as it stands.  Raise it for a small *factor* over a wide
+          intensity range.
+        - ``counter_signal`` -- an array counter confirming the detector
+          plugin processed the frame just taken, e.g.
+          ``"lambda250k_stats5_array_counter"``.  Set it for an area
+          detector: its plugin callbacks are asynchronous, and a stale
+          reading drives the adjustment the wrong way.
+        - ``move_timeout`` -- how long to wait for the transmission readback
+          to move before concluding the filter bank cannot step further.
+          Raise it for a slow bank; too small a value ends the retake loop
+          after one adjustment.
+        - ``settle``, ``min_transmission``, ``max_transmission``, ``enabled``.
+
+        A point that cannot be brought into range -- already wide open and
+        still too dim, already at the minimum and still too bright, or the
+        filters exhausted -- is accepted as it stands and the scan moves on.
+
+        To switch it off without losing the settings, pass
+        ``{"enabled": false}``.
+        """
+        return session_call("set_attenuation", values=values)
+
+    @mcp.tool()
     def get_last_scan() -> dict:
         """Report the last scan and the peak of each of its detectors.
 

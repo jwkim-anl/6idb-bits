@@ -61,7 +61,7 @@ ECHO_PREFIX = "[LLM]"
 #: Mutating ops are sent as real code, so they do.  The motion module adds its
 #: own reads to this set in :mod:`id6_b.mcp_server.session`, which is where the
 #: two are combined -- importing them here would be a cycle.
-READ_OPS = frozenset({"get_state", "get_position"})
+READ_OPS = frozenset({"get_state", "get_position", "get_attenuation"})
 
 #: Message prefixes the ``_gui_hkl_*`` helpers use when they decline to do
 #: something.  Advisory only -- it sets the ``ok`` flag as a convenience, and
@@ -180,7 +180,15 @@ def _gui_mcp_ops():
             "session",
         ),
         "cancel_request": (_gui_mcp_op_cancel, ("token", "reason"), True, "session"),
+        # -- automatic attenuation -----------------------------------------
+        # Mutating but *not* parked for approval: it moves nothing itself.
+        # Same standing as set_mode or set_fixed_angles, which decide where a
+        # later approved move actually goes and are likewise ungated.  The
+        # filters do move once it is armed, but only inside a scan the
+        # operator approved, and every adjustment prints to the console.
+        "set_attenuation": (_gui_mcp_atten_set, ("values",), True, "session"),
         # -- reading the session -------------------------------------------
+        "get_attenuation": (_gui_mcp_atten_state, (), False, "session"),
         "get_request": (_gui_mcp_request_state, (), False, "session"),
         "list_axes": (_gui_mcp_list_axes, (), False, "session"),
         "read_axes": (_gui_mcp_read_axes, ("axes",), False, "session"),
