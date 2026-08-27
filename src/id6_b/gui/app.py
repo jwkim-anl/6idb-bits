@@ -354,18 +354,39 @@ class MainWindow(QMainWindow):
         self.font_spin.blockSignals(blocked)
         QSettings(SETTINGS_ORG, SETTINGS_APP).setValue(FONT_SIZE_KEY, points)
 
-    def _on_metadata(self, metadata):
+    def _dispatch(self, hook, *args):
+        """Call *hook* on every tab, surviving one that raises.
+
+        These run inside Qt slots on the 1 Hz poll, and an exception escaping
+        a slot does not merely fail the update: PyQt aborts the process, which
+        takes the kernel and the running experiment with it. That is far too
+        much to lose to a display bug in one tab -- a malformed reply once
+        killed a live session through ``QComboBox.addItems``. Log it, tell the
+        status bar, and let the other tabs update.
+        """
         for tab in self._tab_widgets:
-            tab.on_metadata(metadata)
+            try:
+                getattr(tab, hook)(*args)
+            except Exception:
+                logger.exception(
+                    "%s.%s failed; the other tabs were still updated.",
+                    type(tab).__name__,
+                    hook,
+                )
+                self.state_label.setText(
+                    f"{getattr(tab, 'title', type(tab).__name__)} tab failed to "
+                    "update — see the log."
+                )
+
+    def _on_metadata(self, metadata):
+        self._dispatch("on_metadata", metadata)
 
     def _on_kernel_values(self, values):
-        for tab in self._tab_widgets:
-            tab.on_kernel_values(values)
+        self._dispatch("on_kernel_values", values)
 
     def _on_kernel_state(self, state):
         self.state_label.setText(_STATE_TEXT.get(state, f"kernel: {state}"))
-        for tab in self._tab_widgets:
-            tab.on_kernel_state(state)
+        self._dispatch("on_kernel_state", state)
 
     def _on_restart_clicked(self):
         answer = QMessageBox.question(

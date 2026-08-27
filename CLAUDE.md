@@ -946,6 +946,15 @@ def align():
   set in `_build_tabs`, so the restart path works whether or not `AgentTab` is
   in `TABS`.
 
+  `MainWindow._dispatch(hook, *args)` fans the poller signals out to the tabs
+  **inside a `try`**, logging and carrying on rather than letting one tab's
+  exception escape. These run in Qt slots, and an exception escaping a slot
+  does not merely fail the update — PyQt aborts the process, which takes the
+  kernel and the running experiment with it. A malformed `channels` list once
+  killed a live session that way through `QComboBox.addItems`; losing an
+  experiment to a display bug in one tab is far too high a price, so the
+  failing tab is named in the status bar and the rest still update.
+
 **Adding a tab:** subclass `BaseTab`, set `title`, override the hooks you need,
 add the class to `TABS` in `app.py`. The window wires the poller signals to
 every tab automatically.
