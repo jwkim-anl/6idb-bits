@@ -172,3 +172,15 @@ from id6_b.plans.pva_streaming import (  # noqa: F401, E402
     pva_stream,
     pva_streaming_setup,
 )
+
+from id6_b.plans.hkl_pv_sync import (  # noqa: F401, E402
+    hkl_pv,
+    hkl_pv_setup,
+)
+
+# Publish the orientation, detector centre and axis directions to the
+# 6idb1: conversion PVs, and keep them matching.  The first write happens on
+# the watcher's own first tick rather than here: default_settings() runs
+# before the channels are guaranteed connected, and waiting for them would
+# add seconds to every session start whenever that IOC is down.
+hkl_pv.start()

@@ -373,6 +373,16 @@ id6_b.devices.pva_streaming.PvaStreamControl:
   prefix: "6idb1:"
   labels: ["pva_stream"]
 
+# The HKL-conversion PVs the area-detector analysis reads: UB matrix, detector
+# centre channel and distance, and the sign convention of every axis.  Written
+# by plans/hkl_pv_sync.py.  Not "baseline" -- these describe a run rather than
+# being measured by it, and the two waveforms could not go in an event
+# descriptor anyway.
+id6_b.devices.hkl_pvs.HklConversionPVs:
+- name: hkl_pvs
+  prefix: "6idb1:"
+  labels: ["hkl_pvs"]
+
 id6_b.devices.keithley.Keithley2400:
 - name: keithley2400
   prefix: "6idb1:K24K:"

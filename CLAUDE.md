@@ -69,7 +69,8 @@ queue-monitor &                           # GUI client
 6. `RE(make_devices(file="devices_aps_only.yml"))` — only when on APS subnet
 7. Call `default_settings()` on every `oregistry` device that defines one — `make_devices()` does **not** do this. Required for `LocalScalerCH`: without it the unnamed scaler channels keep `Kind.hinted|normal` and their empty EPICS names break the event descriptor. Failures are logged per-device rather than aborting startup. Runs before the baseline stream is built so baseline devices are configured before their first read.
 8. `setup_baseline_stream(sd, oregistry)` — adds devices labeled `"baseline"` to the supplemental data stream
-9. Import `counters` singleton, `local_scans` plans, the `center_maximum` plans (`cen`, `com`, `maxi`, `mini` and the `*2` aliases), `attenuation_setup`/`auto_atten` and `pva_streaming_setup`/`pva_stream` into the session namespace
+9. Import `counters` singleton, `local_scans` plans, the `center_maximum` plans (`cen`, `com`, `maxi`, `mini` and the `*2` aliases), `attenuation_setup`/`auto_atten`, `pva_streaming_setup`/`pva_stream` and `hkl_pv_setup`/`hkl_pv` into the session namespace
+10. `hkl_pv.start()` — start the watcher that publishes the orientation, detector centre and axis directions to the `6idb1:` conversion PVs. Deliberately **not** a `default_settings()`: that loop (step 7) runs before the channels are guaranteed connected, and waiting for them there would add seconds to every session start whenever that IOC is down. The first write happens on the watcher's own first tick instead — same visible result, off the startup path.
 
 ### Device configuration (`src/id6_b/configs/devices.yml`)
 
@@ -88,6 +89,7 @@ Key device groups currently active:
 | `apstools.devices.mb_creator` | Optics table, cryostat carrier, diffractometer table, polarization analyzer | `opty2`, `cryo`, `diff`, `analy` |
 | `id6_b.devices.filters.FilterBank` | Filter/attenuator bank (transmission + energy source) | `filters` |
 | `id6_b.devices.pva_streaming.PvaStreamControl` | PVA streaming cache control (flag + file name + directory) | `pva_stream` |
+| `id6_b.devices.hkl_pvs.HklConversionPVs` | HKL-conversion PVs (UB matrix, detector centre/distance, axis directions) | `hkl_pvs` |
 | `id6_b.devices.keithley.Keithley2400` | Keithley 2400 source meter | `keithley2400` |
 | `hklpy2.creator` | E6C diffractometers (hkl, psi, q2 engines); real diffractometers use `EpicsMonochromatorRO` beam | `psic_sim`, `psic`, `psic_psi`, `psic_q` |
 | `id6_b.devices.lambda_detector.Lambda250kDetector` | Lambda 250K area detector | `lambda250k` |
@@ -123,6 +125,36 @@ The `sl1`–`sl3` entries show the per-axis `class:` hook of `mb_creator`: the f
   it, which is why `plans/pva_streaming.py` abbreviates the home directory to
   `~` and warns on the rest.
 
+- **`hkl_pvs.py`** — `HklConversionPVs` (prefix `6idb1:`): the Channel Access
+  PVs the beamline's area-detector analysis converts images with —
+  `spec:UB_matrix:Value` (a 9-element waveform, row-major),
+  `DetectorSetup:CenterChannelPixel` (2 elements),
+  `DetectorSetup:Distance`, and the eight `stringout`s naming each axis's sign
+  convention (`Mu:DirectionAxis` … `Delta:DirectionAxis`,
+  `DetectorSetup:PixelDirection1`/`2`). Written by
+  `plans/hkl_pv_sync.py`; this module is only the write side.
+
+  Every component is `kind="omitted"` and the device is **not** labeled
+  `"baseline"`, for the reason `PvaStreamControl` is not: these values
+  describe a run rather than being measured by it. The two waveforms could not
+  go in an event descriptor anyway — Bluesky does not take arrays in a scalar
+  data key, which is why `Lambda250kDetector.default_kinds` strips its ndarray
+  attributes. `read()` on the device returns `{}`; that is the check.
+
+  **Two direction conventions are declared here as module constants**, so they
+  are greppable and stated once: `HKLPY2_DIRECTIONS` (what the session solves
+  in today, and the default) and `SPEC_DIRECTIONS` (what the future
+  `ad_hoc_diffractometer` geometry will use), keyed by `DIRECTION_KEYS` and
+  selected through `CONVENTIONS`. `set_directions(convention)` writes only the
+  PVs that disagree and returns `{key: (old, new)}`, so a repeated call is
+  silent. Nothing selects `spec` yet — it is inert until someone passes
+  `convention="spec"` to `hkl_pv_setup`.
+
+  **Four PV names in the original request were wrong**, confirmed against the
+  live IOC and corrected here: the prefix is `6idb1:`, not `6id1:`; the pixel
+  directions are `DetectorSetup:PixelDirection1`/`2` with a **colon**, not a
+  dot; and `PixelDirection1` was listed twice where the second is
+  `PixelDirection2`.
 - **`keithley.py`** — `Keithley2400` (prefix `6idb1:K24K:`): `inp` (programmed voltage/current + ranges) and `meas` (sensed voltage/current, `sense_function`) sub-devices, plus `source_function`. Not labeled `"baseline"` — `meas.voltage` reads the EPICS UDF sentinel `9.91e37` whenever the sense function is not voltage. Ported from `bluesky/instrument/devices/keith2400.py`.
 - **`lakeshore_controllers.py`** — `LS340Device` for Lakeshore 340 temperature controller (currently disabled in devices.yml).
 - **`lambda_detector.py`** — `Lambda250kDetector` area detector with HDF5, ROI (1–4), and stats (1–5) plugins. **Enabled** in `devices.yml` with labels `["detector", "detectors"]` (no `"baseline"` — area detectors require `stage()` before reading and must not be in the baseline stream). Implements the `CountersClass` interface: `plot_options` returns `["Stats1"…"Stats5"]`; `select_plot(channels)` sets `Kind.hinted` on selected stats; `plot_signals` maps those names to the `statsN.total` signals for the GUI's Detectors tab. Call `configure_lambda(lambda250k)` after enabling to wire up ROI/stats ports and set default kinds.
@@ -372,6 +404,67 @@ pva_stream                            # settings, and the next file name
   which has not happened yet when the wrapper and the metadata hook run.
   `pva_metadata()` puts the resulting `file_path`/`file_name` in the run start
   document, which is the only durable record linking a scan to its cache file.
+
+- **`hkl_pv_sync.py`** — keep the `6idb1:` HKL-conversion PVs matching the
+  live session. The session is the source: `psic.sample.UB` is flattened
+  row-major into `spec:UB_matrix:Value`, `lambda250k.xcenter`/`ycenter` go to
+  `CenterChannelPixel`, and the eight direction PVs get whichever convention
+  is selected. Same singleton-plus-`*_setup()` shape as `pva_streaming` and
+  `auto_attenuation`, including the atomic setup that snapshots `__dict__`,
+  applies, validates and rolls back.
+
+```python
+hkl_pv                                    # settings, and what the PVs hold
+hkl_pv_setup(diffractometer="psic_sim")   # publish the simulator instead
+hkl_pv_setup(convention="spec")           # the ad_hoc geometry's directions
+hkl_pv.enabled = False                    # stop writing, settings kept
+hkl_pv.push()                             # write once, by hand
+```
+
+  **On by default** (`enabled=True`), unlike the other two: this only
+  publishes, it does not change what a scan does.
+
+  There are two writers, and both are needed. A **1 Hz daemon-thread watcher**
+  (`start()`/`stop()`) is what covers everything: UB changes in nine
+  kernel-side `_gui_hkl_*` helpers, in every MCP op, and across the whole
+  `utils/hkl_utils_pete.py` console API, so explicit hooks would be both
+  numerous and permanently incomplete — a poll reaches the console paths no
+  GUI-side hook could. And `hkl_pv_decorator`, on `count`/`ascan`/`grid_scan`
+  as the **outermost** decorator, pushes once as the scan opens, so the values
+  are right for the data being taken even with the watcher stopped.
+
+  Five details worth keeping:
+
+  - **Comparison is against the PV readback, not a cached last-write.** That
+    is what makes the PVs a genuine mirror rather than a write log: a stray
+    `caput` is corrected on the next tick. A disconnected, empty or
+    wrong-length waveform counts as different, so the first push after the IOC
+    comes back writes rather than skips.
+  - **The watcher's loop pushes first and waits after**, so `hkl_pv.start()`
+    at the tail of `startup.py` publishes immediately rather than a second
+    later, and `interval` is read each time round so a change takes effect on
+    the next tick.
+  - **Every tick is wrapped, with rate-limited logging.** A disconnected PV
+    would otherwise write to the log once a second for the length of an
+    experiment; the message is logged when it *changes*, and recovery is
+    logged once.
+  - **`hkl_pv_wrapper` never lets a push kill a scan** — the failure is logged
+    and the plan runs. A bookkeeping PV is not worth an aborted run.
+  - **`DetectorSetup:Distance` is exposed but not synced**, because nothing on
+    the Bluesky side sources it. Set it directly
+    (`hkl_pvs.distance.put(400.644)`); `repr(hkl_pv)` reports what it holds
+    and says it is not synced, rather than inventing a source.
+
+  **`xcenter`/`ycenter` are plain Python ints on the detector class**
+  (`lambda_detector.py:169-170`), not signals, so they are 256 in a fresh
+  session regardless of what the PV held — and the first push of a session
+  therefore overwrites the PV with 256. Set the session's value first with
+  `lambda250k.image_cen(x, y)`. Any future area detector carrying those two
+  attribute names works by passing `detector=` to `hkl_pv_setup`.
+
+  Not included, and additive on top of `_gui_*` wrappers over `hkl_pv_setup`
+  when wanted: a Detectors-tab group and MCP tools, in the shape of
+  `gui/pva_bridge.py` and `gui/atten_bridge.py`.
 
 - **`center_maximum.py`** — `cen`, `com`, `maxi`, `mini` (plus POLAR's `cen2`/`maxi2`/`mini2` aliases): move one positioner onto a feature of the **last** scan, so the alignment loop is a plan rather than a copy-and-paste of the number BEC printed:
 

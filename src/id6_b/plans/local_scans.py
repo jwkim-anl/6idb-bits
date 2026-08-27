@@ -51,6 +51,7 @@ from .auto_attenuation import attenuation_metadata
 from .auto_attenuation import auto_atten
 from .auto_attenuation import one_local_shot
 from .local_preprocessors import configure_counts_decorator, extra_devices_decorator
+from .hkl_pv_sync import hkl_pv_decorator
 from .pva_streaming import pva_metadata
 from .pva_streaming import pva_streaming_decorator
 
@@ -295,6 +296,7 @@ def count(num, time, detectors=None, delay=None, per_shot=None, md=None):
     _md.update(pva_metadata())
     _md.update(md or {})
 
+    @hkl_pv_decorator()
     @pva_streaming_decorator()
     @configure_counts_decorator(detectors, time)
     @extra_devices_decorator(extras)
@@ -375,6 +377,7 @@ def ascan(
     _md.update(pva_metadata())
     _md.update(md or {})
 
+    @hkl_pv_decorator()
     @pva_streaming_decorator()
     @subs_decorator(nxwriter.receiver)
     @configure_counts_decorator(detectors, time)
@@ -503,6 +506,7 @@ def grid_scan(
     _md.update(pva_metadata())
     _md.update(md or {})
 
+    @hkl_pv_decorator()
     @pva_streaming_decorator()
     @subs_decorator(nxwriter.receiver)
     @configure_counts_decorator(detectors, time)
