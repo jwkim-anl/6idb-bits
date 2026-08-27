@@ -51,6 +51,8 @@ from .auto_attenuation import attenuation_metadata
 from .auto_attenuation import auto_atten
 from .auto_attenuation import one_local_shot
 from .local_preprocessors import configure_counts_decorator, extra_devices_decorator
+from .pva_streaming import pva_metadata
+from .pva_streaming import pva_streaming_decorator
 
 try:
     from hklpy2 import current_diffractometer
@@ -290,8 +292,10 @@ def count(num, time, detectors=None, delay=None, per_shot=None, md=None):
     for item in detectors:
         _md["hints"]["detectors"].extend(item.hints["fields"])
     _md.update(attenuation_metadata())
+    _md.update(pva_metadata())
     _md.update(md or {})
 
+    @pva_streaming_decorator()
     @configure_counts_decorator(detectors, time)
     @extra_devices_decorator(extras)
     @subs_decorator(nxwriter.receiver)
@@ -368,8 +372,10 @@ def ascan(
     for item in detectors:
         _md["hints"]["detectors"].extend(item.hints["fields"])
     _md.update(attenuation_metadata())
+    _md.update(pva_metadata())
     _md.update(md or {})
 
+    @pva_streaming_decorator()
     @subs_decorator(nxwriter.receiver)
     @configure_counts_decorator(detectors, time)
     @extra_devices_decorator(extras)
@@ -494,8 +500,10 @@ def grid_scan(
     for item in detectors:
         _md["hints"]["detectors"].extend(item.hints["fields"])
     _md.update(attenuation_metadata())
+    _md.update(pva_metadata())
     _md.update(md or {})
 
+    @pva_streaming_decorator()
     @subs_decorator(nxwriter.receiver)
     @configure_counts_decorator(detectors, time)
     @extra_devices_decorator(extras)

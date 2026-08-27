@@ -69,7 +69,7 @@ queue-monitor &                           # GUI client
 6. `RE(make_devices(file="devices_aps_only.yml"))` — only when on APS subnet
 7. Call `default_settings()` on every `oregistry` device that defines one — `make_devices()` does **not** do this. Required for `LocalScalerCH`: without it the unnamed scaler channels keep `Kind.hinted|normal` and their empty EPICS names break the event descriptor. Failures are logged per-device rather than aborting startup. Runs before the baseline stream is built so baseline devices are configured before their first read.
 8. `setup_baseline_stream(sd, oregistry)` — adds devices labeled `"baseline"` to the supplemental data stream
-9. Import `counters` singleton, `local_scans` plans, the `center_maximum` plans (`cen`, `com`, `maxi`, `mini` and the `*2` aliases) and `attenuation_setup`/`auto_atten` into the session namespace
+9. Import `counters` singleton, `local_scans` plans, the `center_maximum` plans (`cen`, `com`, `maxi`, `mini` and the `*2` aliases), `attenuation_setup`/`auto_atten` and `pva_streaming_setup`/`pva_stream` into the session namespace
 
 ### Device configuration (`src/id6_b/configs/devices.yml`)
 
@@ -87,6 +87,7 @@ Key device groups currently active:
 | `apstools.devices.mb_creator` | 4-blade slits; `sl1`–`sl3` add IOC-computed center/size axes, `sl4` drives center/gap directly | `sl1`, `sl2`, `sl3`, `sl4` |
 | `apstools.devices.mb_creator` | Optics table, cryostat carrier, diffractometer table, polarization analyzer | `opty2`, `cryo`, `diff`, `analy` |
 | `id6_b.devices.filters.FilterBank` | Filter/attenuator bank (transmission + energy source) | `filters` |
+| `id6_b.devices.pva_streaming.PvaStreamControl` | PVA streaming cache control (flag + file name + directory) | `pva_stream` |
 | `id6_b.devices.keithley.Keithley2400` | Keithley 2400 source meter | `keithley2400` |
 | `hklpy2.creator` | E6C diffractometers (hkl, psi, q2 engines); real diffractometers use `EpicsMonochromatorRO` beam | `psic_sim`, `psic`, `psic_psi`, `psic_q` |
 | `id6_b.devices.lambda_detector.Lambda250kDetector` | Lambda 250K area detector | `lambda250k` |
@@ -105,6 +106,23 @@ The `sl1`–`sl3` entries show the per-axis `class:` hook of `mb_creator`: the f
 - **`energy_device.py`** — `EnergySignal` (ophyd `Signal`): coordinates beamline energy by moving `mono.energy` and any device in `oregistry` labeled `"track_energy"` whose `tracking` flag is enabled. Supports optional `energy_offset` per tracking device. Feedback hooks present but must be adapted to 6-ID-B's feedback system before enabling. `mono` must be created before `energy` in `devices.yml`.
 - **`scaler.py`** — `LocalScalerCH` (prefix `6idb1:scaler1`): extends `ScalerCH` with `preset_monitor` (seconds ↔ clock-count conversion for the time channel), `freq` component, `monitor` setter (selects monitor and adjusts gates), and `select_read/plot_channels()`. Also `plot_signals` (channel label → signal), the companion to `plot_options` used by the GUI's Detectors tab to read and set each channel's `Kind`. `default_settings()` is called by the `default_settings` loop in `startup.py` (step 7) — **not** by `make_devices()`, which has no such hook. Without it `scaler.channels.chan32` keeps its default `Kind.hinted|normal` and its empty EPICS name reaches the descriptor, raising `ValidationError: '' does not match any of the regexes` on any scan that reads the scaler. `select_plot_channels()` iterates all channels: unnamed ones get `Kind.omitted` (prevents empty-string keys in `data_keys`), named non-selected get `Kind.normal`, selected get `Kind.hinted`.
 - **`filters.py`** — `FilterBank` (prefix `6idb1:filter:`): `transmission` (readback + `TransmissionSetpoint` write PV), `allin()`/`allout()` helpers, and a read-only `energy` `AttributeSignal` that reports `energy_beamline` or `energy_local` according to `energy_select` ("Mono"/"Local"). Ported from `bluesky/instrument/devices/filter.py`; renamed from `filter` so it no longer shadows the Python builtin. **Do not `mv()` the transmission** — put completion is off and the readback is the transmission the IOC realized rather than the one requested, so `EpicsSignal.set` polls forever for a match that never comes; see the `_WriteOnly` shim under `plans/auto_attenuation.py`.
+- **`pva_streaming.py`** — `PvaStreamControl` (prefix `6idb1:`): the three PVs
+  that drive the PVA streaming writer — `ScanOn:Value` (cache flag),
+  `FileName:Value` and `FilePath:Value` — plus `start_caching()`/`stop_caching()`
+  convenience methods. Every component is `kind="omitted"`: the device is never
+  in a detector or extras list, and the file it will write is recorded in run
+  metadata by `plans/pva_streaming.py` instead. Not labeled `"baseline"` — two
+  string PVs buy nothing there, and the streaming server is not always running.
+
+  **The two path PVs hold 39 usable characters.** They are `stringout`
+  records (`ScanOn:Value` is a `longout`), and a `stringout`'s `VAL` *is* the
+  40-byte `DBF_STRING` field, so there is no longer buffer behind it and the
+  long-string (`$`) suffix buys nothing. `/home/beams18/USER6IDB` alone is 22
+  characters. Anything longer
+  is truncated by the server **silently** — nothing on the client side reports
+  it, which is why `plans/pva_streaming.py` abbreviates the home directory to
+  `~` and warns on the rest.
+
 - **`keithley.py`** — `Keithley2400` (prefix `6idb1:K24K:`): `inp` (programmed voltage/current + ranges) and `meas` (sensed voltage/current, `sense_function`) sub-devices, plus `source_function`. Not labeled `"baseline"` — `meas.voltage` reads the EPICS UDF sentinel `9.91e37` whenever the sense function is not voltage. Ported from `bluesky/instrument/devices/keith2400.py`.
 - **`lakeshore_controllers.py`** — `LS340Device` for Lakeshore 340 temperature controller (currently disabled in devices.yml).
 - **`lambda_detector.py`** — `Lambda250kDetector` area detector with HDF5, ROI (1–4), and stats (1–5) plugins. **Enabled** in `devices.yml` with labels `["detector", "detectors"]` (no `"baseline"` — area detectors require `stage()` before reading and must not be in the baseline stream). Implements the `CountersClass` interface: `plot_options` returns `["Stats1"…"Stats5"]`; `select_plot(channels)` sets `Kind.hinted` on selected stats; `plot_signals` maps those names to the `statsN.total` signals for the GUI's Detectors tab. Call `configure_lambda(lambda250k)` after enabling to wire up ROI/stats ports and set default kinds.
@@ -294,6 +312,66 @@ auto_atten.enabled = False                        # off, settings kept
     `min_transmission` and moves on — a whole scan quietly attenuated to
     nothing. Take a blank frame and check `max_value` is at the noise floor
     before arming it.
+
+- **`pva_streaming.py`** — start and stop the PVA streaming data cache around a
+  scan. Writes the directory and file name, sets `ScanOn` to 1 before the scan,
+  and clears it a second later after. **Off until `pva_streaming_setup()` is
+  called**, and while off the plans behave exactly as they did before it
+  existed (`pva_stream.ready` is False → the wrapper yields the plan unchanged
+  and `pva_metadata()` returns `{}`).
+
+```python
+experiment_setup("~/6idb-bits", sample="Fe3O4", base_name="scan")
+pva_streaming_setup()                 # arm
+RE(ascan(psic.eta, -1, 1, 51, 1.0))
+#   FilePath -> ~/6idb-bits/Fe3O4
+#   FileName -> pva_scan_00042.h5
+#   ScanOn   -> 1 ... scan ... 1 s ... ScanOn -> 0
+
+pva_stream.enabled = False            # off, settings kept
+pva_stream                            # settings, and the next file name
+```
+
+  Wired into `count`, `ascan` and `grid_scan` as the **outermost** decorator, so
+  the cache is on before `subs_decorator` opens the NeXus writer and off after
+  it closes; `lup` and `rel_grid_scan` need nothing, since they delegate.
+
+  Five details worth keeping:
+
+  - **The flag is cleared from a `finalize_wrapper`.** A scan that is Ctrl-C'd,
+    hits a soft limit or raises would otherwise leave the cache collecting
+    forever, filling a disk with a file nobody is going to close. Tested against
+    a real RunEngine for all three exits — clean, exception, and pause-then-
+    abort — and `ScanOn` ends at 0 in each.
+  - **The 1 s delay is `bps.sleep`, not `time.sleep`.** A plan message is
+    interruptible and shows in the RunEngine's own timing; a process sleep
+    blocks the whole thread including the Ctrl-C handler. `stop_delay` is the
+    knob if the cache turns out to need longer than a second to flush.
+  - **`_WriteOnly` again, not plain `bps.mv`.** Same shim, same reason as
+    `auto_attenuation` — these three PVs are not IOC records, so whether a write
+    echoes back byte for byte is unknown, and `EpicsSignal.set()` polls the
+    readback until it matches with `write_timeout=None`, i.e. forever. A path
+    the server normalises or truncates would hang the RunEngine on the *first*
+    scan. Imported from `auto_attenuation` rather than copied, so there stays
+    one copy of that workaround.
+  - **Paths are abbreviated to `~`** (`use_tilde`, on by default), because the
+    PV holds 39 characters and the full prefix eats 22 of them. **Whatever
+    consumes the PV therefore has to expand `~` itself.** This is a stopgap, not
+    the fix — `_check_length()` logs a warning and `repr(pva_stream)` prints a
+    `!` line whenever a value still overflows, so the truncation cannot happen
+    unremarked.
+  - **`_home_relative()` resolves both sides before comparing.** `$HOME` here is
+    `/home/beams/USER6IDB`, an alias for the `/home/beams18/USER6IDB` that
+    experiment paths are built from, so `p.is_relative_to(Path.home())` is
+    `False` and a naive check would silently never abbreviate anything —
+    producing exactly the truncation it exists to avoid. With both sides
+    `.resolve()`d it is `True`.
+
+  The scan id comes from `RE.md["scan_id"] + 1`, the same expression
+  `local_scans._setup_paths` uses: the counter is bumped when the run opens,
+  which has not happened yet when the wrapper and the metadata hook run.
+  `pva_metadata()` puts the resulting `file_path`/`file_name` in the run start
+  document, which is the only durable record linking a scan to its cache file.
 
 - **`center_maximum.py`** — `cen`, `com`, `maxi`, `mini` (plus POLAR's `cen2`/`maxi2`/`mini2` aliases): move one positioner onto a feature of the **last** scan, so the alignment loop is a plan rather than a copy-and-paste of the number BEC printed:
 
@@ -935,6 +1013,35 @@ def align():
   latches `_atten_loaded`, since the former can arrive before the session is
   up and would otherwise stop the fields ever being populated.
 
+  Below it sits the **PVA streaming cache** group — armed flag, file-name
+  format, stop delay, the `~` abbreviation, the next file that will be written
+  and a **live readback of the three PVs** — on the same Apply-when-idle rule,
+  and here for the same reason: it changes what future scans do. Arming
+  mid-scan would name the cache file for a scan already under way, which is why
+  it waits for idle rather than merely for the kernel to answer.
+
+  It follows every convention the attenuation group established (Apply as a
+  polled *expression* so a refusal cannot read as success, once-only field fill
+  via `_pva_loaded`, `available: False` not latching while an `error` does), so
+  only what is new is worth recording:
+
+  - **The readback line exists because the truncation is silent.** The
+    character counts (`path_over` / `name_over`) are a *prediction* about a
+    39-character `DBF_STRING`; what the IOC kept after the last scan is the
+    *result*, and it is the only thing that settles whether a path fitted.
+  - **`ScanOn` is on that line for the other half of the same worry.** Any
+    reply the GUI receives was evaluated while the kernel was idle, so no scan
+    is running — which makes a flag reading 1 proof of a cache left collecting
+    by a scan that died in a way the `finalize_wrapper` could not catch. The
+    group says so in a warning rather than leaving it to be noticed as a full
+    disk.
+  - **`_pva_flag()` reads through `float` before `bool`.** The PV comes back as
+    `0`, `0.0` or `"0"` depending on how it is served, and `bool("0")` is True
+    — which would report a stuck cache on every idle poll.
+  - **An empty box means "leave that setting alone"**, as in the attenuation
+    group: `name_format` and `stop_delay` are omitted from the payload when
+    blank, since `""` would come back as a refusal to parse a number.
+
   Extra devices get `Kind` control too, as `<name>   (extra)` nodes in the same
   tree. They have no `plot_signals`, so their channels come from
   `walk_signals(include_lazy=False)` and are set by dotted attribute path
@@ -978,6 +1085,38 @@ def align():
   with `rd()`, for which kind is irrelevant. `_gui_atten_find_signal()`
   searches every signal for the same reason, and resolves a data key back to
   the signal *object* the loop needs.
+
+- **`pva_bridge.py`** — `PVA_HELPERS_CODE`, the kernel-side
+  `_gui_pva_state()` / `_gui_pva_set()` behind the Detectors tab's PVA
+  streaming group, appended to the bootstrap cell next to the attenuation
+  string. Its own module for the reason `motion.py` is one rather than more
+  lines in `bridge.py`: one feature's kernel code with its own validation
+  surface. It differs from `atten_bridge.py` in having **one** caller — there
+  are no `_gui_mcp_pva_*` wrappers, and adding them if an MCP client ever
+  wants to arm the cache is the same two functions at the bottom.
+
+  Everything routes through `plans.pva_streaming.pva_streaming_setup`, so
+  there is no second copy of the rules and the GUI is held to what the console
+  is. Two checks live here rather than there, both because the alternative is
+  a failure that surfaces at the wrong moment:
+
+  - **The name format is `%`-tested at Apply**, with `fmt % ("scan", 1)`. It
+    is otherwise only ever applied inside the scan wrapper, so a bad format
+    would surface as a `TypeError` that kills the *first scan after it was
+    set* — long after the mistake, and with the cache flag already on.
+  - **`path_over` / `name_over` are computed here**, not in the GUI, so
+    `MAX_STRING` has one owner.
+
+  `_gui_pva_readback()` guards each `.get()` separately and reports `None` on
+  failure: the streaming server is not always running, and a disconnected PV
+  must leave the rest of the Detectors tab working. It uses `getattr(device,
+  attr)` — an explicit `device.__getattr__(attr)` bypasses normal attribute
+  lookup on an ophyd `Device` and returned `None` for all three.
+
+  Note `pva_streaming_setup` ends in `print(repr(pva_stream))`, which from the
+  GUI's Apply fires *inside* the `user_expressions` evaluation and so carries
+  the poller's `msg_id` as parent — `_drain_iopub` filters it out. Invisible
+  from the tab, still useful from the console.
 
 - **`tabs/devices.py`** — `DevicesTab`, a sortable/filterable table of
   `oregistry.root_devices` (name, class, prefix, labels, connected). Uses

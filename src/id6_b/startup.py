@@ -168,3 +168,7 @@ from id6_b.plans.auto_attenuation import (  # noqa: F401, E402
     attenuation_setup,
     auto_atten,
 )
+from id6_b.plans.pva_streaming import (  # noqa: F401, E402
+    pva_stream,
+    pva_streaming_setup,
+)

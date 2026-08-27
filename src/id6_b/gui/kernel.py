@@ -42,6 +42,7 @@ from ..mcp_server.motion import MOTION_HELPERS_CODE
 from ..mcp_server.session import POINTER_NAME
 from .atten_bridge import ATTEN_HELPERS_CODE
 from .hkl_bridge import HKL_HELPERS_CODE
+from .pva_bridge import PVA_HELPERS_CODE
 from .session_setup import SESSION_SETUP_CODE
 
 logger = logging.getLogger(__name__)
@@ -580,6 +581,7 @@ class KernelSession(QObject):
             MCP_HELPERS_CODE,
             MOTION_HELPERS_CODE,
             ATTEN_HELPERS_CODE,
+            PVA_HELPERS_CODE,
         ]
         if follow_up_code:
             parts.append(follow_up_code)

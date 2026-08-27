@@ -43,6 +43,7 @@ from qtpy.QtWidgets import QVBoxLayout
 from qtpy.QtWidgets import QWidget
 
 from .base import BaseTab
+from .base import value_label
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,10 @@ EXTRA_KINDS_KEY = "detector_extra_kinds"
 #: Automatic attenuation settings (see ``gui/atten_bridge.py``).
 ATTEN_KEY = "detector_attenuation"
 ATTEN_EXPR = "_gui_atten_state()"
+
+#: PVA streaming cache settings (see ``gui/pva_bridge.py``).
+PVA_KEY = "detector_pva"
+PVA_EXPR = "_gui_pva_state()"
 
 #: Caps on the attenuation entry boxes.  Uncapped, a ``QGridLayout`` column
 #: with a stretch factor hands its widget the whole surplus, so a box holding
@@ -190,6 +195,7 @@ class DetectorsTab(BaseTab):
         # rewriting them on every reply would pull the text out from under
         # whoever is typing in them.
         self._atten_loaded = False
+        self._pva_loaded = False  # same, for the PVA streaming fields
 
         self._tree = QTreeWidget()
         self._tree.setColumnCount(FIRST_KIND_COLUMN + len(KIND_CHOICES))
@@ -232,6 +238,7 @@ class DetectorsTab(BaseTab):
             channels,
             self._build_extras_group(),
             self._build_attenuation_group(),
+            self._build_pva_group(),
         ]
         layout = QVBoxLayout(self)
         layout.addLayout(_half_width(self._groups[0]), 1)
@@ -345,6 +352,99 @@ class DetectorsTab(BaseTab):
         outer.addLayout(row)
         return box
 
+    def _build_pva_group(self):
+        """The PVA streaming cache, started and stopped around each scan.
+
+        Here for the same reason as the attenuation group: it is kernel-side
+        configuration that changes what *future* scans do, and what it caches
+        is the detector stream listed above.
+        """
+        box = QGroupBox("PVA streaming cache")
+        outer = QVBoxLayout(box)
+        caption = QLabel(
+            "Writes the directory and file name to the streaming server and "
+            "raises its ScanOn flag before each scan, clearing it a moment "
+            "after. The flag is cleared even by a scan that is interrupted "
+            "or fails."
+        )
+        caption.setWordWrap(True)
+        outer.addWidget(caption)
+
+        self._pva_enabled = QCheckBox("Arm PVA streaming")
+        self._pva_enabled.setToolTip(
+            "While this is off the scans behave exactly as they did before "
+            "the feature existed."
+        )
+        outer.addWidget(self._pva_enabled)
+
+        grid = QGridLayout()
+        # Same column arrangement as the attenuation grid: the fields are
+        # capped and an empty right-hand column takes the surplus.
+        for column in range(4):
+            grid.setColumnStretch(column, 0)
+        grid.setColumnStretch(4, 1)
+
+        self._pva_format = QLineEdit()
+        self._pva_format.setToolTip(
+            "printf format applied to (experiment base name, scan number), "
+            "as 'pva_%s_%05d.h5' is."
+        )
+        self._pva_format.setMaximumWidth(ATTEN_NAME_WIDTH)
+        grid.addWidget(QLabel("File name format"), 0, 0)
+        grid.addWidget(self._pva_format, 0, 1, 1, 4)
+
+        self._pva_delay = QLineEdit()
+        self._pva_delay.setToolTip(
+            "Seconds between the end of the scan and ScanOn → 0, so the cache "
+            "can finish writing."
+        )
+        self._pva_delay.setMaximumWidth(ATTEN_VALUE_WIDTH)
+        grid.addWidget(QLabel("Stop delay"), 1, 0)
+        grid.addWidget(self._pva_delay, 1, 1)
+        grid.addWidget(QLabel("s"), 1, 2)
+
+        self._pva_tilde = QCheckBox("Abbreviate the home directory to ~")
+        self._pva_tilde.setToolTip(
+            "The directory PV holds 39 characters and /home/beams18/USER6IDB "
+            "alone is 22 of them, so a full path is usually truncated. "
+            "Whatever reads the PV has to expand the ~ itself."
+        )
+        grid.addWidget(self._pva_tilde, 2, 0, 1, 5)
+
+        self._pva_next = value_label()
+        # Wrapped for the reason the caption is: an unwrapped path sets the
+        # group's minimum width from its own one-line hint.
+        self._pva_next.setWordWrap(True)
+        grid.addWidget(QLabel("Next file"), 3, 0)
+        grid.addWidget(self._pva_next, 3, 1, 1, 4)
+
+        self._pva_readback = value_label()
+        self._pva_readback.setWordWrap(True)
+        self._pva_readback.setToolTip(
+            "What the three PVs hold now. The directory PV is the one to "
+            "check: an over-long path is truncated by the server without "
+            "anything being reported to the client."
+        )
+        grid.addWidget(QLabel("PVs now"), 4, 0)
+        grid.addWidget(self._pva_readback, 4, 1, 1, 4)
+
+        outer.addLayout(grid)
+
+        self._pva_warning = QLabel()
+        self._pva_warning.setWordWrap(True)
+        self._pva_warning.setVisible(False)
+        outer.addWidget(self._pva_warning)
+
+        row = QHBoxLayout()
+        self._pva_status = QLabel("Waiting for the session…")
+        row.addWidget(self._pva_status, 1)
+        self._pva_apply = QPushButton("Apply")
+        self._pva_apply.clicked.connect(self._apply_pva)
+        self._pva_apply.setEnabled(False)
+        row.addWidget(self._pva_apply)
+        outer.addLayout(row)
+        return box
+
     def _build_extras_group(self):
         """Devices recorded alongside the detectors at every scan point."""
         box = QGroupBox("Also record during scans (extra devices)")
@@ -390,6 +490,7 @@ class DetectorsTab(BaseTab):
                 EXTRAS_KEY: EXTRAS_EXPR,
                 EXTRA_KINDS_KEY: f"_gui_extra_kinds({show_omitted!r})",
                 ATTEN_KEY: ATTEN_EXPR,
+                PVA_KEY: PVA_EXPR,
             }
         )
 
@@ -422,6 +523,9 @@ class DetectorsTab(BaseTab):
         attenuation = values.get(ATTEN_KEY)
         if isinstance(attenuation, dict):
             self._show_attenuation(attenuation)
+        streaming = values.get(PVA_KEY)
+        if isinstance(streaming, dict):
+            self._show_pva(streaming)
 
     # -- automatic attenuation ---------------------------------------------
 
@@ -526,6 +630,130 @@ class DetectorsTab(BaseTab):
         self._atten_loaded = False
         self.request({ATTEN_KEY: f"_gui_atten_set({values!r})"})
         self._atten_status.setText("Applying…")
+
+    # -- PVA streaming ------------------------------------------------------
+
+    @staticmethod
+    def _pva_flag(value):
+        """Interpret a ScanOn readback as a flag, or None when unreadable.
+
+        Read through ``float`` first: the PV comes back as a number, and a
+        bare ``bool`` on the string ``"0"`` -- which is what a differently
+        configured signal would give -- is True.
+        """
+        if value is None:
+            return None
+        try:
+            return bool(float(value))
+        except (TypeError, ValueError):
+            return bool(value)
+
+    def _show_pva(self, state):
+        """Render the PVA streaming settings, or the kernel's refusal."""
+        if state.get("available") is False:
+            # The module is missing.  As with attenuation this must not latch
+            # _pva_loaded: it can arrive before the session is up, and the
+            # fields would then never be filled in.
+            self._pva_status.setText(
+                str(state.get("error") or "PVA streaming is not available.")
+            )
+            self._pva_apply.setEnabled(False)
+            return
+
+        error = state.get("error")
+        if error:
+            # A refused apply.  Leave the fields as typed so the mistake can be
+            # corrected in place.
+            self._pva_loaded = True
+            self._pva_status.setText(str(error))
+            self._update_apply_enabled()
+            return
+
+        if not self._pva_loaded:
+            self._pva_loaded = True
+            self._pva_enabled.setChecked(bool(state.get("enabled")))
+            self._pva_tilde.setChecked(bool(state.get("use_tilde")))
+            self._pva_format.setText(str(state.get("name_format") or ""))
+            delay = state.get("stop_delay")
+            self._pva_delay.setText("" if delay is None else f"{delay:g}")
+
+        path = state.get("file_path")
+        name = state.get("file_name")
+        if path and name:
+            self._pva_next.setText(f"{path}/{name}")
+        else:
+            self._pva_next.setText(
+                str(state.get("next_error") or "(experiment not set up)")
+            )
+
+        flag = self._pva_flag(state.get("scan_on"))
+        pv_path = state.get("pv_file_path")
+        pv_name = state.get("pv_file_name")
+        if flag is None and pv_path is None and pv_name is None:
+            self._pva_readback.setText("(not connected)")
+        else:
+            caching = {None: "?", True: "1 (caching)", False: "0"}[flag]
+            self._pva_readback.setText(
+                f"ScanOn {caching}   {pv_path or '?'}/{pv_name or '?'}"
+            )
+
+        limit = state.get("max_string")
+        warnings = []
+        for label, value, key in (
+            ("directory", path, "path_over"),
+            ("file name", name, "name_over"),
+        ):
+            if state.get(key):
+                warnings.append(
+                    f"! The {label} is {len(value)} characters; the PV holds "
+                    f"{limit} and the server truncates the rest without "
+                    f"reporting it."
+                )
+        if flag:
+            # Any reply we receive was evaluated while the kernel was idle, so
+            # no scan is running -- a raised flag here is a cache left
+            # collecting, not one in normal use.
+            warnings.append(
+                "! ScanOn is set with no scan running; the cache is still "
+                "collecting. Clear it with pva_stream.stop_caching()."
+            )
+        self._pva_warning.setText("\n".join(warnings))
+        self._pva_warning.setVisible(bool(warnings))
+
+        if state.get("ready"):
+            self._pva_status.setText("Armed.")
+        elif state.get("enabled"):
+            self._pva_status.setText(
+                f"Enabled, but no device named '{state.get('device')}' was found."
+            )
+        else:
+            self._pva_status.setText("Off.")
+        self._update_apply_enabled()
+
+    def _apply_pva(self):
+        """Send the on-screen streaming settings to the kernel, then re-read."""
+        values = {
+            "enabled": self._pva_enabled.isChecked(),
+            "use_tilde": self._pva_tilde.isChecked(),
+        }
+        # An empty box means "leave that setting alone", as it does in the
+        # attenuation group -- sending "" would be refused as not a number.
+        for key, widget in (
+            ("name_format", self._pva_format),
+            ("stop_delay", self._pva_delay),
+        ):
+            text = widget.text().strip()
+            if text:
+                values[key] = text
+        # Sent as an expression, not through execute_once, for the reason
+        # _apply_attenuation documents: _gui_pva_set returns the new state, or
+        # a dict with `error` when it refuses, and execute_once discards it.
+        if self.poller is None:
+            self._pva_status.setText("Could not reach the kernel.")
+            return
+        self._pva_loaded = False
+        self.request({PVA_KEY: f"_gui_pva_set({values!r})"})
+        self._pva_status.setText("Applying…")
 
     # -- view -------------------------------------------------------------
 
@@ -638,6 +866,10 @@ class DetectorsTab(BaseTab):
         # under way, so this waits for idle like everything else here.
         self._atten_apply.setEnabled(self._kernel_idle)
         self._atten_apply.setToolTip(waiting)
+        # Arming mid-scan would mean the cache file was named for a scan that
+        # is already under way, so this waits for idle too.
+        self._pva_apply.setEnabled(self._kernel_idle)
+        self._pva_apply.setToolTip(waiting)
         if not self._rows:
             return
         if not changes:
