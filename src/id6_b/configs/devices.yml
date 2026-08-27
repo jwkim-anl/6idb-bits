@@ -454,6 +454,22 @@ hklpy2.creator:
     nu: m29
     delta: m18
 
+# LakeShoure 340 temperature controller
+apstools.devices.LakeShore340Device:
+- name: temp340
+  prefix: "6idb1:LS340:TC1:"
+  labels: ["temperature", "baseline"]
+
+# B station shutters
+#apstools.devices.ApsPssShutterWithStatus:
+#- name: bshutter
+#  prefix: ""
+#  state_pv: "PB:06ID:STA_B_SBS_CLSD_PL.VAL"
+#  open_pv: "6ida1:AcO6"
+#  close_pv: "6ida1:AcO5"
+#  labels: ["shutter", "baseline"]
+
+
 # --- Ported from bluesky/instrument/devices but IOC not reachable ------
 # Each of these was probed with caget and did not connect.  Uncomment (and
 # for pilatus/vortex, add the device module) once the IOC is running.
@@ -515,11 +531,7 @@ hklpy2.creator:
 
 # FIXME: control object fails to load properly
 # TODO: after BITS version is upgraded (includes startup.py updates)
-#id6_b.devices.lakeshore_controllers.LS340Device:
-#- name: lakeshore340
-#  # Lakeshore 340 - Low temperature
-#  prefix: "6idb1:LS340:TC1:"
-#  labels: ["lakeshore", "baseline"]
+
 
 id6_b.devices.lambda_detector.Lambda250kDetector:
 - name: lambda250k
