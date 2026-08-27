@@ -17,6 +17,7 @@ import time
 from qtpy.QtCore import Qt
 from qtpy.QtCore import QTimer
 from qtpy.QtWidgets import QAbstractItemView
+from qtpy.QtWidgets import QAbstractSpinBox
 from qtpy.QtWidgets import QCheckBox
 from qtpy.QtWidgets import QComboBox
 from qtpy.QtWidgets import QDoubleSpinBox
@@ -63,6 +64,17 @@ MOVE_TIMEOUT_S = 600.0
 #: them, so an uncapped box grows and drags its label away from it.
 VALUE_WIDTH = 110
 
+#: Cap on the six lattice boxes, which sat at their own ``sizeHint`` -- 112 px
+#: for a/b/c, 102 for the angles -- and left the row looking padded.
+#:
+#: This is the narrowest they go while still *showing* their value.  At four
+#: decimals ``120.0000`` is 73 px of glyphs and the frame costs 6 more, so a
+#: literal half of ``VALUE_WIDTH`` (55) scrolls every box: even ``5.4310``
+#: needs 53 px against the 49 px such a box leaves for text.  Dropping the
+#: spin arrows (see :func:`_lattice_spin`) is what buys the rest of the
+#: reduction. Going narrower means fewer decimals, not a smaller number here.
+LATTICE_WIDTH = 80
+
 LATTICE_RANGES = {
     "a": (0.01, 1000.0),
     "b": (0.01, 1000.0),
@@ -71,6 +83,21 @@ LATTICE_RANGES = {
     "beta": (0.01, 179.99),
     "gamma": (0.01, 179.99),
 }
+
+
+def _lattice_spin(minimum, maximum, value):
+    """A lattice-constant box, half the width of an ordinary value box.
+
+    The spin arrows go with the width: they cost about 18 px that the text
+    needs at :data:`LATTICE_WIDTH`, and nobody sets a lattice constant by
+    clicking an arrow — it is typed, or it comes from the sample. Scrolling
+    the wheel over the box still steps the value.
+    """
+    box = _spin(minimum, maximum, value)
+    box.setButtonSymbols(QAbstractSpinBox.NoButtons)
+    box.setMaximumWidth(LATTICE_WIDTH)
+    box.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+    return box
 
 
 def _spin(minimum, maximum, value=0.0, decimals=4):
@@ -199,13 +226,18 @@ class HklTab(BaseTab):
         self._lattice_boxes = {}
         for column, name in enumerate(("a", "b", "c", "alpha", "beta", "gamma")):
             low, high = LATTICE_RANGES[name]
-            spin = _spin(low, high, 1.0 if name in "abc" else 90.0)
+            spin = _lattice_spin(low, high, 1.0 if name in "abc" else 90.0)
             self._lattice_boxes[name] = spin
             grid.addWidget(QLabel(name), 0, column)
             grid.addWidget(spin, 1, column)
+            grid.setColumnStretch(column, 0)
         self._apply_lattice_button = QPushButton("Apply lattice")
         self._apply_lattice_button.clicked.connect(self._apply_lattice)
         grid.addWidget(self._apply_lattice_button, 1, 6)
+        # Send the surplus width to an empty column on the right rather than
+        # into the boxes, the pattern tabs/scan.py documents.  Without it the
+        # narrowed boxes would simply be re-stretched back.
+        grid.setColumnStretch(7, 1)
         outer.addLayout(grid)
         return box
 
