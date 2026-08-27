@@ -1,0 +1,56 @@
+The server is a stdio MCP server: the client spawns id6b-mcp as a child process and talks JSON-RPC over its stdin/stdout. Your working config is already in ~/.claude.json, scoped to this project:
+
+"6idb-hkl": {
+  "type": "stdio",
+  "command": "/home/beams/USER6IDB/.conda/envs/6idb-bits/bin/id6b-mcp",
+  "args": [],
+  "env": {}
+}
+
+That's what this session is using. Two preconditions:
+
+1. The GUI must be running first. id6b-gui writes .id6b-gui-kernel.json into its kernel's cwd; the server walks up from its own cwd to find it. No GUI, no session.
+2. The server's cwd must be inside the session's directory tree — or you override discovery:
+  - --connection-file /home/beams18/USER6IDB/6idb-bits/.id6b-gui-kernel.json
+  - or ID6B_GUI_KERNEL_FILE=<same path> in env.
+
+Right now the pointer is stale — it names PID 1538431 and /tmp/tmpjav0ndu7.json, neither of which exists any more. Any call will come back with "points at PID 1538431, which is no longer running. The GUI did not shut down cleanly; start it again." Restart id6b-gui and it rewrites itself.
+
+From another computer
+
+Not as-is. Three layers all assume same-machine, and they fail in different ways:
+
+- stdio — the client spawns a local process. There's no port to point at.
+- The kernel's ZMQ ports — QtKernelManager binds 127.0.0.1, so they aren't reachable off-box even if you knew them.
+- Channel Access and .re_md_dict.yml — get_session_status reads motor PVs directly and the scan id from a file in the kernel's cwd. Both need the beamline subnet and the beamline filesystem.
+
+The way that actually works: run the server over SSH
+
+Keep the server on the beamline machine and let SSH carry the stdio. On the remote client:
+
+"6idb-hkl": {
+  "type": "stdio",
+  "command": "ssh",
+  "args": [
+    "-T", "user6idb@reciprocore.xray.aps.anl.gov",
+    "/home/beams/USER6IDB/.conda/envs/6idb-bits/bin/id6b-mcp",
+    "--connection-file", "/home/beams18/USER6IDB/6idb-bits/.id6b-gui-kernel.json"
+  ]
+}
+
+Everything stays on the beamline box, so CA, the metadata file and the approval gate all behave exactly as they do now. Passing the pointer path rather than a connection file is deliberate: the connection file is a fresh /tmp name on every GUI start, the pointer path is stable.
+
+Two things to check before trusting it, neither of which I've tested:
+
+- Key-based auth, no password prompt — a prompt would land in the protocol stream.
+- A silent login. Your shell is tcsh, and anything a .cshrc/.login prints to stdout will corrupt the JSON-RPC framing. Verify with ssh -T user6idb@reciprocore true | xxd | head — that must produce nothing at all.
+
+Tunnelling the kernel instead: possible, degraded, don't
+
+You could SSH-tunnel the five ZMQ ports, copy the connection file over, and run id6b-mcp --connection-file <copy> remotely. Passing a real connection file skips the pid check (resolve_connection_file tells the two file types apart by content), so that part would work. But get_session_status loses its PV readbacks unless the client machine has CA access to the beamline subnet, and loses scan_id unless it can also see the kernel's cwd — which is precisely the tool you want while a scan is blocking everything else.
+
+The security reason to prefer SSH: the connection file contains the kernel's HMAC key, and anyone who can reach those ports with it can execute arbitrary Python in the live beamline session. The human-approval gate lives inside _gui_mcp; a raw kernel client goes around it entirely. SSH keeps the authentication where it belongs.
+
+If you want proper remote support later
+
+server.py:662 is a bare mcp.run(), which defaults to stdio. The SDK also speaks streamable HTTP, so this is close to a one-line change plus a bind address, auth and a reverse proxy. Worth doing if more than one person needs to drive the session remotely; the SSH wrapper is the right answer for one.
