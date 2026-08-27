@@ -319,38 +319,59 @@ class Lambda250kDetector(MySingleTrigger, DetectorBase):
         self.xcenter = xc
         self.ycenter = yc
 
+    #: Name of the whole-frame max-pixel channel.  Named here because it also
+    #: has to be typed into ``iconfig.yml`` and into ``attenuation_setup``.
+    MAX_PIXEL_CHANNEL = "Stats5 max"
+
+    def _plot_map(self):
+        """Channel name -> the signal it reads.
+
+        One source of truth for :attr:`plot_options`, :attr:`plot_signals` and
+        :meth:`select_plot`, so the three cannot drift apart as channels are
+        added.
+        """
+        channels = {f"Stats{i}": getattr(self, f"stats{i}").total for i in range(1, 6)}
+        # The brightest pixel on the *whole frame* -- stats5 is the plugin
+        # configure_lambda points at PROC1, where stats1-4 see ROI1-4.  This is
+        # what auto_attenuation watches, and listing it here is what puts
+        # ``lambda250k_stats5_max_value`` in the event: select_plot gives every
+        # channel it knows about a kind, and even the unselected ones get
+        # Kind.normal, which is still read at every point.
+        channels[self.MAX_PIXEL_CHANNEL] = self.stats5.max_value
+        return channels
+
     @property
     def plot_options(self):
-        """Return stats channel names for use by CountersClass."""
-        return [f"Stats{i}" for i in range(1, 6)]
+        """Return channel names for use by CountersClass."""
+        return list(self._plot_map())
 
     @property
     def plot_signals(self):
-        """Return a mapping of stats channel name -> its ``total`` signal.
+        """Return a mapping of channel name -> the signal it reads.
 
         Companion to :attr:`plot_options`: same names, but resolved to the
         underlying signal so callers can inspect or change its ``kind``.
         Used by the GUI's Detectors tab.
         """
-        return {f"Stats{i}": getattr(self, f"stats{i}").total for i in range(1, 6)}
+        return self._plot_map()
 
     def select_plot(self, channels):
-        """Set Kind.hinted on the stats matching *channels*, Kind.normal on others.
+        """Set Kind.hinted on the channels matching *channels*, normal on others.
 
         Called by CountersClass.select_plot_channels with the list of channel
         names chosen by the user from detectors_plot_options.
+
+        Note that unselected channels become ``Kind.normal`` rather than
+        ``Kind.omitted`` -- still read at every point, just not plotted.
 
         Parameters
         ----------
         channels : list of str
             Subset of ``plot_options`` (e.g. ``["Stats1", "Stats3"]``).
         """
-        for i in range(1, 6):
-            stat = getattr(self, f"stats{i}")
-            if f"Stats{i}" in channels:
-                stat.total.kind = Kind.hinted
-            else:
-                stat.total.kind = Kind.normal
+        for name, signal in self._plot_map().items():
+            signal.kind = Kind.hinted if name in channels else Kind.normal
+
 
 def configure_lambda(lambda250k):
     """Configure the Lambda 250k detector."""
@@ -371,6 +392,12 @@ def configure_lambda(lambda250k):
                 stat.nd_array_port.put("PROC1")
             else:
                 stat.nd_array_port.put(f"ROI{stat.port_name.get()[-1]}")
+            # max_value/min_value are in read_attrs (see default_kinds), but
+            # nothing computes them unless the plugin is enabled and asked
+            # to.  auto_attenuation watches stats5.max_value, and a stats
+            # plugin that is merely connected reports a stale zero.
+            stat.enable.put("Enable")
+            stat.compute_statistics.put("Yes")
     logger.info("Done!")
 
     logger.info("Setting up defaults kinds ...")

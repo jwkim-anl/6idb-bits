@@ -107,7 +107,30 @@ The `sl1`–`sl3` entries show the per-axis `class:` hook of `mb_creator`: the f
 - **`filters.py`** — `FilterBank` (prefix `6idb1:filter:`): `transmission` (readback + `TransmissionSetpoint` write PV), `allin()`/`allout()` helpers, and a read-only `energy` `AttributeSignal` that reports `energy_beamline` or `energy_local` according to `energy_select` ("Mono"/"Local"). Ported from `bluesky/instrument/devices/filter.py`; renamed from `filter` so it no longer shadows the Python builtin.
 - **`keithley.py`** — `Keithley2400` (prefix `6idb1:K24K:`): `inp` (programmed voltage/current + ranges) and `meas` (sensed voltage/current, `sense_function`) sub-devices, plus `source_function`. Not labeled `"baseline"` — `meas.voltage` reads the EPICS UDF sentinel `9.91e37` whenever the sense function is not voltage. Ported from `bluesky/instrument/devices/keith2400.py`.
 - **`lakeshore_controllers.py`** — `LS340Device` for Lakeshore 340 temperature controller (currently disabled in devices.yml).
-- **`lambda_detector.py`** — `Lambda250kDetector` area detector with HDF5, ROI (1–4), and stats (1–5) plugins. **Enabled** in `devices.yml` with labels `["detector", "detectors"]` (no `"baseline"` — area detectors require `stage()` before reading and must not be in the baseline stream). Implements the `CountersClass` interface: `plot_options` returns `["Stats1"…"Stats5"]`; `select_plot(channels)` sets `Kind.hinted` on selected stats; `plot_signals` maps those names to the `statsN.total` signals for the GUI's Detectors tab. Call `configure_lambda(lambda250k)` after enabling to wire up ROI/stats ports and set default kinds. Has a `setup_images()` method used by `local_scans` to configure per-scan HDF5 file paths; a `save_image_flag` attribute controls whether images are saved.
+- **`lambda_detector.py`** — `Lambda250kDetector` area detector with HDF5, ROI (1–4), and stats (1–5) plugins. **Enabled** in `devices.yml` with labels `["detector", "detectors"]` (no `"baseline"` — area detectors require `stage()` before reading and must not be in the baseline stream). Implements the `CountersClass` interface: `plot_options` returns `["Stats1"…"Stats5"]`; `select_plot(channels)` sets `Kind.hinted` on selected stats; `plot_signals` maps those names to the `statsN.total` signals for the GUI's Detectors tab. Call `configure_lambda(lambda250k)` after enabling to wire up ROI/stats ports and set default kinds.
+
+  **`stats5` is the whole frame; `stats1`–`stats4` are not.** `configure_lambda`
+  points stats1–4 at `ROI1`–`ROI4` and stats5 at `PROC1`, so
+  `lambda250k.stats5.max_value` is the brightest pixel on the detector and the
+  others are per-ROI maxima. `max_value`/`min_value` are already in every event
+  — `default_kinds()` adds them to each stats plugin's `read_attrs` — but
+  nothing *computes* them unless the plugin is enabled and asked to, so
+  `configure_lambda` now also sets `enable` and `compute_statistics`. A stats
+  plugin that is merely connected reports a stale zero. `auto_attenuation`
+  watches `stats5.max_value`, which is what made this matter; note that stats5
+  sees the image *after* `PROC1`, so check that plugin's clipping is off before
+  trusting the number (high clipping caps `max_value` and the "too bright"
+  branch can then never fire).
+
+  **`setup_images()` and `save_image_flag` do not exist on this class**, despite
+  `_setup_paths` (`local_scans.py:165-167`) probing for them with `getattr`. The
+  probe therefore always fails and the Lambda is skipped: no per-scan HDF5 path
+  is configured for it and no NeXus `ExternalLink` is built. That is worth
+  knowing before adding them — `auto_attenuation` drops rejected events, and
+  every dropped event still triggered the detector, so a frame and its datum
+  exist with no event pointing at them. Today that is only stray files, because
+  the accepted event still references its own datum; the day the NeXus writer
+  starts assuming frame index equals event index, it stops being harmless.
 
 ### Key configuration files (`src/id6_b/configs/`)
 
