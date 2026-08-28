@@ -108,24 +108,6 @@ DETAIL_COLUMN = 1
 FIRST_KIND_COLUMN = 2
 
 
-def _half_width(widget):
-    """Give *widget* the left half of its row and leave the right half empty.
-
-    A share of the width rather than a pixel cap, so it tracks the window
-    instead of going wrong on the next monitor.
-
-    Half is the *preference*, not a limit: a widget whose minimum width is
-    larger wins, and ``DetectorsTab._fit_tree_width`` sets exactly such a
-    minimum from the populated columns.  So the group is half the window when
-    half is enough to show everything, and grows past half instead of
-    scrolling when it is not.
-    """
-    row = QHBoxLayout()
-    row.addWidget(widget, 1)
-    row.addStretch(1)
-    return row
-
-
 def _centered(widget):
     """Wrap *widget* so it sits in the middle of its tree cell.
 
@@ -240,10 +222,15 @@ class DetectorsTab(BaseTab):
             self._build_attenuation_group(),
             self._build_pva_group(),
         ]
+        # Full width, so every group follows the window.  The groups place
+        # their own surplus internally -- the tree leaves it blank past the
+        # last column (``setStretchLastSection(False)`` above), and the two
+        # settings grids send it to an empty stretch column -- so widening
+        # the tab widens the groups without stretching any single field.
         layout = QVBoxLayout(self)
-        layout.addLayout(_half_width(self._groups[0]), 1)
+        layout.addWidget(self._groups[0], 1)
         for group in self._groups[1:]:
-            layout.addLayout(_half_width(group))
+            layout.addWidget(group)
 
     def _build_attenuation_group(self):
         """Threshold-driven filter transmission control during scans.
@@ -782,12 +769,11 @@ class DetectorsTab(BaseTab):
     def _fit_tree_width(self):
         """Ask for at least the width the columns actually need.
 
-        The group is laid out as a share of the window (see
-        :func:`_half_width`), which on its own let the tree fall below its
-        content and scroll sideways.  A minimum computed from the *populated*
-        columns is what stops that: it follows the channel names actually
-        present rather than a guess, and it still lets the group take only
-        half when half is more than enough.
+        The groups follow the window width, which on a narrow window let the
+        tree fall below its content and scroll sideways.  A minimum computed
+        from the *populated* columns is what stops that: it follows the
+        channel names actually present rather than a guess, and it leaves the
+        tab free to be as wide as the window when the window is wider.
 
         Capped at :data:`TREE_MAX_MINIMUM` so an unusually long name cannot
         push the tab wider than the window and move the scrollbar rather than
