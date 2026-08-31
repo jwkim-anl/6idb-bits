@@ -24,9 +24,12 @@ from ophyd.areadetector.trigger_mixins import ADTriggerStatus
 
 logger = logging.getLogger(__name__)
 
-# TODO: Change these paths to S6 ones.
-LAMBDA_FILES_ROOT = "/home/xspadmin/6idb"
-BLUESKY_FILES_ROOT = "/home/beams/USER6IDB/data/lambda"
+# The same export seen from two hosts: LAMBDA_FILES_ROOT is where the detector
+# IOC writes, BLUESKY_FILES_ROOT is where this session reads the same files
+# back.  They must stay pointing at one directory or every datum resolves to a
+# path that is not there.
+LAMBDA_FILES_ROOT = "/net/s6iddserv/export/beams18/USER6IDB/Data/lambda"
+BLUESKY_FILES_ROOT = "/home/beams/USER6IDB/Data/lambda"
 TEST_IMAGE_DIR = "%Y/%m/%d/"
 
 
