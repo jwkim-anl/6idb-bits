@@ -129,9 +129,10 @@ The `sl1`–`sl3` entries show the per-axis `class:` hook of `mb_creator`: the f
   PVs the beamline's area-detector analysis converts images with —
   `spec:UB_matrix:Value` (a 9-element waveform, row-major),
   `DetectorSetup:CenterChannelPixel` (2 elements),
-  `DetectorSetup:Distance`, and the eight `stringout`s naming each axis's sign
+  `DetectorSetup:Distance`, the eight `stringout`s naming each axis's sign
   convention (`Mu:DirectionAxis` … `Delta:DirectionAxis`,
-  `DetectorSetup:PixelDirection1`/`2`). Written by
+  `DetectorSetup:PixelDirection1`/`2`) and the three
+  `PrimaryBeamDirection:AxisNumber1`/`2`/`3` scalars. Written by
   `plans/hkl_pv_sync.py`; this module is only the write side.
 
   Every component is `kind="omitted"` and the device is **not** labeled
@@ -149,6 +150,17 @@ The `sl1`–`sl3` entries show the per-axis `class:` hook of `mb_creator`: the f
   PVs that disagree and returns `{key: (old, new)}`, so a repeated call is
   silent. Nothing selects `spec` yet — it is inert until someone passes
   `convention="spec"` to `hkl_pv_setup`.
+
+  **A convention is eleven PVs, not eight**: the axis sign strings *and* the
+  primary beam direction, `(1, 0, 0)` under hklpy2 and `(0, 1, 0)` under spec.
+  The beam half is a second mapping — `BEAM_DIRECTIONS`, keyed by `BEAM_KEYS`,
+  built from `HKLPY2_BEAM_DIRECTION`/`SPEC_BEAM_DIRECTION` — because it is
+  numeric where the other is strings, and three scalar `DBF_DOUBLE` records
+  where the axis directions are `stringout`s. Keeping the two mappings from
+  drifting is the point of writing them together: `set_directions()` looks up
+  both before writing either and refuses a name known to only one, and
+  `HklPvSync.values()` reports it as a problem rather than publishing half a
+  geometry. Add a convention to one and it must go in the other.
 
   **Four PV names in the original request were wrong**, confirmed against the
   live IOC and corrected here: the prefix is `6idb1:`, not `6id1:`; the pixel
@@ -408,7 +420,8 @@ pva_stream                            # settings, and the next file name
 - **`hkl_pv_sync.py`** — keep the `6idb1:` HKL-conversion PVs matching the
   live session. The session is the source: `psic.sample.UB` is flattened
   row-major into `spec:UB_matrix:Value`, `lambda250k.xcenter`/`ycenter` go to
-  `CenterChannelPixel`, and the eight direction PVs get whichever convention
+  `CenterChannelPixel`, and the eleven convention PVs — eight axis sign
+  strings plus the three beam-direction components — get whichever convention
   is selected. Same singleton-plus-`*_setup()` shape as `pva_streaming` and
   `auto_attenuation`, including the atomic setup that snapshots `__dict__`,
   applies, validates and rolls back.

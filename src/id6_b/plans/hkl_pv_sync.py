@@ -2,8 +2,9 @@
 
 The beamline's analysis converts detector images using
 :class:`~id6_b.devices.hkl_pvs.HklConversionPVs` -- the UB matrix, the
-detector's centre channel and the axis direction convention.  This module is
-what writes them, from two places:
+detector's centre channel, and the convention: the eight axis sign strings
+plus the three components of the primary beam direction.  This module is what
+writes them, from two places:
 
 * a **watcher**, a one-second background thread that pushes whatever has
   changed, so an orientation computed in the console, in the GUI's HKL tab or
@@ -52,6 +53,8 @@ from logging import getLogger
 from apsbits.core.instrument_init import oregistry
 from bluesky.preprocessors import make_decorator
 
+from ..devices.hkl_pvs import BEAM_DIRECTIONS
+from ..devices.hkl_pvs import BEAM_KEYS
 from ..devices.hkl_pvs import CONVENTIONS
 from ..devices.hkl_pvs import DIRECTION_KEYS
 
@@ -151,10 +154,10 @@ class HklPvSync:
         """What the PVs should hold, plus a reason for anything missing.
 
         Returns a dict with ``ub`` (nine floats, row-major), ``center``
-        (``[x, y]``), ``directions`` (key -> string) and ``problems``, a list
-        of sentences naming whatever could not be worked out.  A missing piece
-        is left as None rather than raising, so one absent device does not
-        stop the others being published.
+        (``[x, y]``), ``directions`` (key -> string), ``beam`` (three floats)
+        and ``problems``, a list of sentences naming whatever could not be
+        worked out.  A missing piece is left as None rather than raising, so
+        one absent device does not stop the others being published.
         """
         problems = []
 
@@ -196,18 +199,26 @@ class HklPvSync:
                 except (TypeError, ValueError) as exc:
                     problems.append(f"{self.detector} centre is not numeric: {exc}")
 
+        # Both halves of the convention, looked up together: a name known to
+        # one mapping and not the other is a mistake in the device module, and
+        # publishing half a geometry would be worse than publishing none.
         directions = CONVENTIONS.get(self.convention)
-        if directions is None:
+        beam = BEAM_DIRECTIONS.get(self.convention)
+        if directions is None or beam is None:
             problems.append(
                 f"Unknown convention '{self.convention}'; expected one of "
-                f"{', '.join(sorted(CONVENTIONS))}."
+                f"{', '.join(sorted(set(CONVENTIONS) & set(BEAM_DIRECTIONS)))}."
             )
             directions = {}
+            beam = None
+        else:
+            beam = [float(v) for v in beam]
 
         return {
             "ub": ub,
             "center": center,
             "directions": dict(directions),
+            "beam": beam,
             "problems": problems,
         }
 
@@ -246,6 +257,16 @@ class HklPvSync:
             if signal.get() != new:
                 signal.put(new)
                 written[key] = new
+
+        if wanted["beam"] is not None:
+            for key, new in zip(BEAM_KEYS, wanted["beam"], strict=True):
+                signal = device.beam_signal(key)
+                # _close() rather than !=, for the disconnected case: a PV that
+                # reads None must count as different so the first tick after
+                # the IOC comes back writes rather than skips.
+                if not _close(signal.get(), [new]):
+                    signal.put(new)
+                    written[key] = new
 
         if written:
             logger.info("HKL PVs updated: %s", ", ".join(sorted(written)))
@@ -332,6 +353,10 @@ class HklPvSync:
                     + "  ".join(
                         f"{k}={wanted['directions'][k]}" for k in DIRECTION_KEYS
                     )
+                )
+            if wanted["beam"] is not None:
+                lines.append(
+                    "Beam direction: " + ", ".join(f"{v:g}" for v in wanted["beam"])
                 )
             for problem in wanted["problems"]:
                 lines.append(f"  ! {problem}")

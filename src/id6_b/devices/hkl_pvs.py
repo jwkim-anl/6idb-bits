@@ -17,14 +17,20 @@ not take arrays in a scalar data key, which is why
 
 Two direction conventions are declared here.  ``hklpy2`` is the one the session
 solves in today and is the default; ``spec`` is the one the future
-``ad_hoc_diffractometer`` geometry will use, and nothing selects it yet.
+``ad_hoc_diffractometer`` geometry will use, and nothing selects it yet.  A
+convention covers eleven PVs: the eight axis sign strings and the three
+components of the primary beam direction.
 """
 
 __all__ = [
     "HklConversionPVs",
+    "BEAM_DIRECTIONS",
+    "BEAM_KEYS",
     "CONVENTIONS",
     "DIRECTION_KEYS",
+    "HKLPY2_BEAM_DIRECTION",
     "HKLPY2_DIRECTIONS",
+    "SPEC_BEAM_DIRECTION",
     "SPEC_DIRECTIONS",
 ]
 
@@ -65,6 +71,29 @@ SPEC_DIRECTIONS = {
 
 #: Selectable conventions, by name.
 CONVENTIONS = {"hklpy2": HKLPY2_DIRECTIONS, "spec": SPEC_DIRECTIONS}
+
+#: The three components of the primary beam direction, in report order.
+BEAM_KEYS = ("beam1", "beam2", "beam3")
+
+#: Primary beam direction of each convention, as (axis1, axis2, axis3).
+#: A separate mapping from CONVENTIONS because this half is numeric and the
+#: other is strings, but it is keyed the same way and belongs to the same
+#: choice -- a convention added to one must be added to the other, and
+#: :meth:`HklConversionPVs.set_directions` writes both halves together so a
+#: caller cannot pick up one without the other.
+HKLPY2_BEAM_DIRECTION = (1.0, 0.0, 0.0)
+SPEC_BEAM_DIRECTION = (0.0, 1.0, 0.0)
+BEAM_DIRECTIONS = {
+    "hklpy2": HKLPY2_BEAM_DIRECTION,
+    "spec": SPEC_BEAM_DIRECTION,
+}
+
+# Beam key -> component name on HklConversionPVs.
+_BEAM_ATTRS = {
+    "beam1": "beam_direction1",
+    "beam2": "beam_direction2",
+    "beam3": "beam_direction3",
+}
 
 # Direction key -> component name on HklConversionPVs.
 _DIRECTION_ATTRS = {
@@ -120,6 +149,18 @@ class HklConversionPVs(Device):
         EpicsSignal, "Delta:DirectionAxis", string=True, kind="omitted"
     )
 
+    # The primary beam direction, as three scalars rather than one waveform --
+    # that is how the IOC serves it (three DBF_DOUBLE records of one element).
+    beam_direction1 = Component(
+        EpicsSignal, "PrimaryBeamDirection:AxisNumber1", kind="omitted"
+    )
+    beam_direction2 = Component(
+        EpicsSignal, "PrimaryBeamDirection:AxisNumber2", kind="omitted"
+    )
+    beam_direction3 = Component(
+        EpicsSignal, "PrimaryBeamDirection:AxisNumber3", kind="omitted"
+    )
+
     def direction_signal(self, key):
         """The signal publishing direction *key* (one of DIRECTION_KEYS)."""
         try:
@@ -135,8 +176,28 @@ class HklConversionPVs(Device):
         """The eight direction PVs as they currently read."""
         return {key: self.direction_signal(key).get() for key in DIRECTION_KEYS}
 
+    def beam_signal(self, key):
+        """The signal publishing beam component *key* (one of BEAM_KEYS)."""
+        try:
+            attr = _BEAM_ATTRS[key]
+        except KeyError:
+            raise ValueError(
+                f"Unknown beam component '{key}'; expected one of "
+                f"{', '.join(BEAM_KEYS)}."
+            ) from None
+        return getattr(self, attr)
+
+    def beam_direction(self):
+        """The primary beam direction as it currently reads, ``[a1, a2, a3]``."""
+        return [self.beam_signal(key).get() for key in BEAM_KEYS]
+
     def set_directions(self, convention="hklpy2"):
-        """Write a whole direction convention, returning what it changed.
+        """Write a whole convention -- both halves -- returning what it changed.
+
+        That is the eight axis sign strings **and** the three primary beam
+        direction components.  They are written together on purpose: the two
+        halves describe one geometry, and a caller who got one without the
+        other would be publishing a convention that exists nowhere.
 
         Only the PVs that disagree are written, so a repeated call is silent
         and costs nothing.  The return value maps each changed key to
@@ -144,10 +205,11 @@ class HklConversionPVs(Device):
         """
         try:
             wanted = CONVENTIONS[convention]
+            beam = BEAM_DIRECTIONS[convention]
         except KeyError:
             raise ValueError(
                 f"Unknown convention '{convention}'; expected one of "
-                f"{', '.join(sorted(CONVENTIONS))}."
+                f"{', '.join(sorted(set(CONVENTIONS) & set(BEAM_DIRECTIONS)))}."
             ) from None
 
         changed = {}
@@ -158,9 +220,18 @@ class HklConversionPVs(Device):
             if old != new:
                 signal.put(new)
                 changed[key] = (old, new)
+        for key, new in zip(BEAM_KEYS, beam, strict=True):
+            signal = self.beam_signal(key)
+            old = signal.get()
+            # These are 0 and 1 exactly, so an equality test is honest here;
+            # the sync layer still compares with a tolerance, since it has to
+            # cope with a disconnected PV handing back None.
+            if old is None or float(old) != float(new):
+                signal.put(new)
+                changed[key] = (old, new)
         if changed:
             logger.info(
-                "Direction axes set to the '%s' convention: %s",
+                "Directions set to the '%s' convention: %s",
                 convention,
                 ", ".join(f"{k} {o}->{n}" for k, (o, n) in changed.items()),
             )
