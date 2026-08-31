@@ -381,7 +381,7 @@ id6_b.devices.pva_streaming.PvaStreamControl:
 id6_b.devices.hkl_pvs.HklConversionPVs:
 - name: hkl_pvs
   prefix: "6idb1:"
-  labels: ["hkl_pvs"]
+  labels: ["hkl_pvs", "baseline"]
 
 id6_b.devices.keithley.Keithley2400:
 - name: keithley2400

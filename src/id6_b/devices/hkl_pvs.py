@@ -7,13 +7,21 @@ Nothing in the Bluesky session used to write them, so they could disagree with
 the session without anything saying so.  This device is the write side;
 :mod:`id6_b.plans.hkl_pv_sync` is what keeps them matching.
 
-Every component is ``kind="omitted"`` and the device is not labelled
-``baseline``, for the reason
-:class:`~id6_b.devices.pva_streaming.PvaStreamControl` is not: these values
-describe a run rather than being measured by it, and they must never reach an
-event descriptor.  The two waveforms could not go in one anyway -- Bluesky does
-not take arrays in a scalar data key, which is why
-``Lambda250kDetector.default_kinds`` strips its ndarray attributes.
+The device **is** labelled ``baseline``, so the geometry a run was taken with
+is recorded in that run rather than only in the IOC, where the next experiment
+overwrites it.  The six values an analysis needs to reproduce the conversion --
+the UB matrix, the centre channel, the distance and the two pixel directions --
+are therefore ``kind="normal"``; the eight axis sign strings and the three beam
+components stay ``kind="omitted"``, since they are a convention the geometry
+already implies rather than a measurement.
+
+That the two waveforms survive a baseline descriptor was checked against a real
+data file, not assumed.  Baseline is a separate stream read once at open and
+once at close, so an array is described with a shape and is fine there; what it
+must never be is a *scalar* data key, which is why
+``Lambda250kDetector.default_kinds`` strips its ndarray attributes and why
+:class:`~id6_b.devices.pva_streaming.PvaStreamControl` -- whose two path strings
+buy nothing in a stream -- is left out of the baseline entirely.
 
 Two direction conventions are declared here.  ``hklpy2`` is the one the session
 solves in today and is the default; ``spec`` is the one the future
@@ -112,22 +120,22 @@ class HklConversionPVs(Device):
     """The orientation, detector geometry and axis-direction PVs."""
 
     # 9 elements, row-major, matching hklpy2's Matrix3x3.
-    ub_matrix = Component(EpicsSignal, "spec:UB_matrix:Value", kind="omitted")
+    ub_matrix = Component(EpicsSignal, "spec:UB_matrix:Value", kind="normal")
 
     # 2 elements: the detector's centre channel, (x, y) in pixels.
     center_pixel = Component(
-        EpicsSignal, "DetectorSetup:CenterChannelPixel", kind="omitted"
+        EpicsSignal, "DetectorSetup:CenterChannelPixel", kind="normal"
     )
 
     # Sample-to-detector distance.  Nothing in the session sources this, so
     # nothing syncs it; it is here to be read and set.
-    distance = Component(EpicsSignal, "DetectorSetup:Distance", kind="omitted")
+    distance = Component(EpicsSignal, "DetectorSetup:Distance", kind="normal")
 
     pixel_direction1 = Component(
-        EpicsSignal, "DetectorSetup:PixelDirection1", string=True, kind="omitted"
+        EpicsSignal, "DetectorSetup:PixelDirection1", string=True, kind="normal"
     )
     pixel_direction2 = Component(
-        EpicsSignal, "DetectorSetup:PixelDirection2", string=True, kind="omitted"
+        EpicsSignal, "DetectorSetup:PixelDirection2", string=True, kind="normal"
     )
 
     mu_direction = Component(

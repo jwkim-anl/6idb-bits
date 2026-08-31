@@ -89,7 +89,7 @@ Key device groups currently active:
 | `apstools.devices.mb_creator` | Optics table, cryostat carrier, diffractometer table, polarization analyzer | `opty2`, `cryo`, `diff`, `analy` |
 | `id6_b.devices.filters.FilterBank` | Filter/attenuator bank (transmission + energy source) | `filters` |
 | `id6_b.devices.pva_streaming.PvaStreamControl` | PVA streaming cache control (flag + file name + directory) | `pva_stream` |
-| `id6_b.devices.hkl_pvs.HklConversionPVs` | HKL-conversion PVs (UB matrix, detector centre/distance, axis directions) | `hkl_pvs` |
+| `id6_b.devices.hkl_pvs.HklConversionPVs` | HKL-conversion PVs (UB matrix, detector centre/distance, axis directions); `"baseline"` | `hkl_pvs` |
 | `id6_b.devices.keithley.Keithley2400` | Keithley 2400 source meter | `keithley2400` |
 | `hklpy2.creator` | E6C diffractometers (hkl, psi, q2 engines); real diffractometers use `EpicsMonochromatorRO` beam | `psic_sim`, `psic`, `psic_psi`, `psic_q` |
 | `id6_b.devices.lambda_detector.Lambda250kDetector` | Lambda 250K area detector | `lambda250k` |
@@ -135,12 +135,22 @@ The `sl1`–`sl3` entries show the per-axis `class:` hook of `mb_creator`: the f
   `PrimaryBeamDirection:AxisNumber1`/`2`/`3` scalars. Written by
   `plans/hkl_pv_sync.py`; this module is only the write side.
 
-  Every component is `kind="omitted"` and the device is **not** labeled
-  `"baseline"`, for the reason `PvaStreamControl` is not: these values
-  describe a run rather than being measured by it. The two waveforms could not
-  go in an event descriptor anyway — Bluesky does not take arrays in a scalar
-  data key, which is why `Lambda250kDetector.default_kinds` strips its ndarray
-  attributes. `read()` on the device returns `{}`; that is the check.
+  The device **is** labeled `"baseline"`, so the geometry a run was taken with
+  is recorded in that run rather than only in the IOC, where the next
+  experiment overwrites it. The six values an analysis needs to reproduce the
+  conversion — UB, centre channel, distance and the two pixel directions — are
+  `kind="normal"`; the eight axis sign strings and the three beam components
+  stay `kind="omitted"`, being a convention the geometry already implies rather
+  than a measurement.
+
+  **That the two waveforms survive a baseline descriptor was checked against a
+  real data file**, not assumed — the concern was real enough to be worth
+  testing. Baseline is a separate stream read once at open and once at close,
+  so an array is described with a shape and is fine there; what an array must
+  never be is a *scalar* data key, which is why
+  `Lambda250kDetector.default_kinds` strips its ndarray attributes, and why
+  `PvaStreamControl` — whose two path strings buy nothing in a stream — is
+  still left out of the baseline entirely.
 
   **Two direction conventions are declared here as module constants**, so they
   are greppable and stated once: `HKLPY2_DIRECTIONS` (what the session solves
