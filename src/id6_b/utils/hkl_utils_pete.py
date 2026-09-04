@@ -66,6 +66,7 @@ __all__ = """
     setaz
     freeze
     freeze_psi
+    wh
 """.split()
 
 try:
@@ -920,7 +921,24 @@ def _wh():
             _geom_for_q_.inverse(0).q, tth_from_q
         )
     )
- 
+
+class whClass:
+    """
+    _wh function used without parenthesis
+    """
+
+    def __repr__(self):
+        print("")
+        try:
+            _wh()
+        except Exception:
+            pass
+        return ""
+
+
+wh = whClass()
+
+
 def _ensure_idle():
     if  RE.state != 'idle':
         print('The RunEngine invoked by magics cannot be resumed.')
