@@ -33,6 +33,7 @@ from apsbits.utils.config_loaders import load_config
 from apsbits.utils.helper_functions import register_bluesky_magics
 from apsbits.utils.helper_functions import running_in_queueserver
 from apsbits.utils.logging_setup import configure_logging
+from hklpy2 import ConfigurationRunWrapper
 from hklpy2.backends.hkl_soleil import libhkl
 
 from id6_b.plans.sim_plans import sim_count_plan  # noqa
@@ -177,6 +178,19 @@ from id6_b.plans.hkl_pv_sync import (  # noqa: F401, E402
     hkl_pv,
     hkl_pv_setup,
 )
+
+# The spec-like console API for hklpy2 -- wh, ca, br, ubr, setmode, setaz,
+# setor0/1, compute_UB, and the diffractometer configuration files.  It has to
+# come after make_devices(): the module resolves psic / psic_sim / psic_q /
+# psic_psi out of oregistry at import time, and calls
+# set_diffractometer(psic).  Only the names in its __all__ are bound, so the
+# RunEngine it builds at module scope does not shadow the session's RE.
+from id6_b.utils.hkl_utils_pete import *  # noqa: F401, F403, E402
+
+# add diffractormeter configuration for each scan.
+for dname in ["psic"]:
+    crw = ConfigurationRunWrapper(oregistry[dname])
+    RE.preprocessors.append(crw.wrapper)
 
 # Publish the orientation, detector centre and axis directions to the
 # 6idb1: conversion PVs, and keep them matching.  The first write happens on
