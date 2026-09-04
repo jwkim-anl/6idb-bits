@@ -190,6 +190,44 @@ class CountersClass:
 
         self._dets = dets
 
+    def sync_selection(self):
+        """Re-derive the detector list from the channels that are hinted now.
+
+        ``select_plot_channels`` sets ``Kind`` and the detector list together,
+        but ``Kind`` can also be changed on its own -- the GUI's Detectors tab
+        does exactly that.  Without this, un-hinting every channel of a
+        detector leaves it in :attr:`detectors`, so it is still triggered and
+        read at every point while having dropped out of
+        :attr:`selected_plot_detectors` -- which is the list
+        ``local_scans._setup_detectors`` validates the monitor against.
+
+        A scaler is kept whatever its channels do, matching
+        ``select_plot_channels``: it carries the time channel.
+
+        Returns the names of the detectors now selected.
+        """
+        scalers = self._available_scalers or []
+        dets = []
+        for det in self._available_detectors:
+            if det in scalers:
+                dets.append(det)
+                continue
+            try:
+                hinted = len(det.hints["fields"]) > 0
+            except Exception:
+                # Better to keep counting a detector we cannot read hints from
+                # than to drop it out of the scan without saying so.
+                logger.warning(
+                    "Could not read hints from %s; leaving its selection as it was.",
+                    det.name,
+                )
+                hinted = det in self._dets
+            if hinted:
+                dets.append(det)
+
+        self._dets = dets
+        return [det.name for det in dets]
+
     def plotselect(self, dets=None, mon=None):
         """Select which channels to plot and which to use as monitor.
 

@@ -228,6 +228,25 @@ The `sl1`–`sl3` entries show the per-axis `class:` hook of `mb_creator`: the f
 
 - **`counters_class.py`** — `CountersClass` + singleton `counters`. Holds the detector list and monitor channel for scan plans. Looks up devices from `oregistry` lazily (safe to import before devices are created). `IDEAL_ORDER = ["scaler", "lambda250k"]` controls detector priority; add new detector names there as hardware is added. For a detector to appear in `counters()` it must implement `plot_options` (list of channel name strings) and `select_plot(channels)` (sets `Kind.hinted`). Adding `plot_signals` (name → signal) is optional but makes the detector's channels appear in the GUI's Detectors tab for `Kind` editing. Usage:
 
+  **`Kind` is not stored here.** `plot_names` and `selected_plot_detectors` are
+  derived on every access from `det.hints["fields"]`, i.e. read straight off the
+  ophyd signals; the only state the class holds is `_dets`, `_mon` and
+  `_extra_devices`. That makes `Kind` a single store with **two writers** —
+  `select_plot_channels()`, which sets `Kind` *and* `_dets` together, and the
+  Detectors tab's `_gui_set_kinds()`, which historically set only `Kind`.
+
+  **`sync_selection()` is what keeps the pair from drifting.** Un-hint every
+  channel of a detector from the GUI and it stayed in `detectors` — still
+  triggered and read at every point — while dropping out of
+  `selected_plot_detectors`, which is the list `local_scans._setup_detectors`
+  validates the monitor against, so a monitor-counts scan that should have been
+  refused would pass. `sync_selection()` re-derives `_dets` from what is hinted
+  now and is called by `_gui_set_kinds` after a successful apply. A **scaler is
+  kept whatever its channels do**, matching `select_plot_channels`: it carries
+  the time channel. A detector whose `hints` raise is *kept*, not dropped —
+  losing a detector out of a scan silently is worse than counting one too
+  many.
+
 ```python
 from id6_b.utils.counters_class import counters
 counters()                           # interactive channel/monitor selection

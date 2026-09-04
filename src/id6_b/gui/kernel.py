@@ -161,6 +161,14 @@ def _gui_set_kinds(changes):
             applied.append((_dev, _chan, _sig.kind.name))
         except Exception as _exc:
             print(f"Could not set {_dev}.{_chan} to {_kind}: {_exc}")
+    if applied:
+        # counters.select_plot_channels sets Kind and the detector list in one
+        # go; setting Kind on its own would leave a detector counted with
+        # nothing hinted, so re-derive the pairing here.
+        try:
+            counters.sync_selection()
+        except Exception as _exc:
+            print(f"Could not update the counters selection: {_exc}")
     return applied
 
 
