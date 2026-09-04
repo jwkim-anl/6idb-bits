@@ -244,6 +244,81 @@ experiment_setup("/data/2024-1/user_name", sample="MyFilm", base_name="scan")
 experiment_setup()
 ```
 
+- **`hkl_utils_pete.py`** — the spec-like console API for hklpy2 (`wh`, `ca`,
+  `br`, `ubr`, `setmode`, `setaz`, `setor0/1`, `compute_UB`, …). `startup.py`
+  star-imports it at step 10, so the whole API is in the session namespace —
+  see that step for the three import-time side effects that buys.
+  `gui/hkl_bridge.py` still deliberately **mirrors** its call sequences
+  rather than importing it: the module builds its own `RunEngine` at module
+  scope, and the bridge must not acquire one. Its imports are grouped in a
+  `try` and it predates the repo's Ruff rules, so it carries ~40 legacy lint
+  errors; leave the old code as it is and keep new additions clean rather than
+  reformatting the file.
+
+  **Configuration files** — `write_diffractometer_config_file(filename,
+  overwrite)`, `read_diffractometer_config_file()` and
+  `read_diffractometer_config_scan(scan_id, diffractometer, clear)`, ported
+  from `polar-bits`' `id4_common/utils/hkl_utils.py`. The first is
+  `Diffractometer.export()` behind a name rule and an overwrite prompt; the
+  second lists `*_6idb_config.yml` in the cwd and restores the chosen one; the
+  third restores the orientation `ConfigurationRunWrapper` saved in a previous
+  run, via `hklpy2.run_utils.get_run_orientation(cat[scan_id])`. Both readers
+  end by recomputing UB from the restored reflections rather than trusting the
+  stored matrix — `_recompute_ub(diffractometer)`, shared so the two cannot
+  drift. Five things differ from the POLAR original:
+
+  - **`CONFIG_SUFFIX` / `CONFIG_COMMENT` are module constants**
+    (`_6idb_config.yml`, `"6-ID-B beamline"`), replacing POLAR's hard-coded
+    `_polar_config.yml` and `"4-ID-G POLAR beamline"`. The suffix is what makes
+    a file recognisable to the reader, so it is stated once.
+  - **`cat` comes through the module, not a from-import**
+    (`from . import run_engine as _re_module`), the indirection
+    `utils/run_engine.py` documents: this module can be imported before or
+    after `startup.py` fills the catalog in, and a from-import would freeze it
+    at `None`. A missing catalog raises a sentence naming the startup rather
+    than `TypeError: 'NoneType' is not subscriptable`.
+  - **`_psi_geometry()` replaces `oregistry.find(name + "_psi")`**, which
+    cannot work here: 6-ID-B registers a single `psic_psi` on the real motors,
+    so `psic_sim` has no `psic_sim_psi` twin and the lookup would raise on the
+    simulator — the more common case. It resolves `geometries.psi` and warns
+    instead of raising, serving the original's purpose (surface a missing psi
+    geometry at restore time rather than later inside `compute_UB()`).
+  - **`read_diffractometer_config_scan` recomputes UB on the diffractometer it
+    restored**, not on the current one. The original calls bare `compute_UB()`,
+    which goes through `get_diffractometer()` — correct only while the
+    `diffractometer=` argument is left at its default, and silently wrong the
+    moment it is passed.
+  - **The recompute is guarded on the orienting pair existing.** POLAR's
+    `compute_UB()` indexes `sample.reflections.order[0]` and `[1]`
+    unconditionally, so restoring a configuration whose active sample has fewer
+    than two reflections raises `IndexError: list index out of range` *after*
+    the restore has already happened. That is not an edge case: a lattice is
+    routinely entered before the first peak is found, hklpy2 stores a default
+    UB (2πB) for such a sample, and `restore(restore_samples=True)` makes it
+    the active one — which is exactly what happened on the first real use here
+    (`test123`, a=3 b=4 c=5, zero reflections). `_recompute_ub` keeps the
+    restored UB in that case and says so, naming the sample and the count.
+
+  **Three non-interactive functions sit under them**, and are what the GUI
+  calls: `export_diffractometer_config(diffractometer, path)`,
+  `apply_diffractometer_config(diffractometer, config, clear=True)` (a path
+  *or* a dict) and `scan_diffractometer_configs(scan_id)`. The extraction
+  happened when the HKL tab grew Save/Load buttons: all three public functions
+  block on `input()` and the GUI kernel runs with `allow_stdin=False`
+  (`gui/kernel.py:612-617`), so a Qt callback reaching them would hang the
+  kernel. The point of extracting rather than reimplementing is that the
+  `restore()` keyword arguments, the `_psi_geometry()` check and the guarded UB
+  recompute keep **one owner** — the `IndexError` fixed in `_recompute_ub`
+  would otherwise have had to be fixed twice. The three public functions keep
+  their prompts and their printed listings and now end by calling these; only
+  the tail moved.
+
+  `restore()` is called with `restore_samples`/`restore_extras`/
+  `restore_constraints` all explicitly `True`, because hklpy2 defaults them to
+  False on hardware-backed diffractometers. Wavelength and mode are
+  deliberately left alone, so restoring a configuration cannot silently
+  retarget motors.
+
 ### Plans (`src/id6_b/plans/`)
 
 - **`sim_plans.py`** — simulation-only plans for testing (`sim_count_plan`, `sim_rel_scan_plan`, `sim_print_plan`)
