@@ -886,6 +886,31 @@ bootstrap in a Jupyter kernel, so the plain IPython workflow is untouched.
   kernel is busy, each with the reason in the tooltip. A statistic can be `None`
   (`cen` has no half-maximum crossing on a flat trace); that one gets no marker
   and its button alone is disabled, while the others still work.
+
+  **Pop out** puts the plot in its own window, so it stays in view while
+  another tab is on top — the request that prompted it. It is a **move, not a
+  copy**: everything the plot is made of lives in one child widget
+  (`self._body`) that is reparented into a `_PlotWindow` and back, so there is
+  one canvas, one `_series` and one selector panel either way. A mirror — a
+  second `ScanPlotTab` fed the same documents — was the alternative and was
+  rejected on two counts: the state would be duplicated and have to be kept in
+  step, and a window opened part-way through a scan would start blank unless
+  the run's documents were buffered and replayed (a 200×200 grid scan is
+  ~40 000 events to hold). Reparenting has neither problem, and it needs no
+  change in `app.py`: the tab stays the one thing on the dispatch list whether
+  the plot is showing inside it or not.
+
+  Four details. The window is **parented to `self.window()`** with the
+  `Qt.Window` flag rather than left parentless — a parentless top-level widget
+  keeps the Qt application alive, so closing the session window would leave the
+  process running with an orphaned plot; the parent is resolved at pop-out
+  time, since in `__init__` the tab is not yet inside the session window.
+  Closing the window **reattaches** rather than losing the plot
+  (`_PlotWindow.closing` → `_reattach`), and `_reattach` clears `self._window`
+  **first**, which is what makes the re-entrant call from its own `close()` a
+  no-op. The tab shows a notice with its own *Bring it back here* button in
+  place of the plot, so a blank tab is never a mystery. Geometry is remembered
+  in `QSettings("APS", "id6b-gui")` under `scanplot/window_geometry`.
 - **`tabs/scan.py`** — `ScanTab`: pick a plan (`count`, `ascan`, `lup`,
   `grid_scan`, `rel_grid_scan`), detectors, axes, points and time per
   point, and press Scan. The form encodes the argument-order difference between

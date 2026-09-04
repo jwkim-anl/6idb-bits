@@ -23,6 +23,13 @@ statistics come from
 :func:`~id6_b.utils.peak_statistics.peak_statistics` fed the *plotted* arrays,
 so a monitor selection is inherited for free -- what the markers show and the
 buttons move to is the peak of the curve on screen, not of the raw detector.
+
+**Pop out** moves the whole plot into a separate window, so it stays in view
+while another tab is on top.  It is a *move*, not a copy: the canvas, the
+series and the selectors are one widget that is reparented, so there is nothing
+to keep in step and a window opened part-way through a scan already has the
+points so far.  The tab shows a notice with a button to bring it back, as does
+closing the window.
 """
 
 import logging
@@ -31,7 +38,9 @@ import numpy
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
+from qtpy.QtCore import QSettings
 from qtpy.QtCore import Qt
+from qtpy.QtCore import Signal
 from qtpy.QtWidgets import QButtonGroup
 from qtpy.QtWidgets import QCheckBox
 from qtpy.QtWidgets import QComboBox
@@ -57,6 +66,17 @@ PRIMARY = "primary"
 #: (``lambda250k_stats1_total``), so the panel scrolls rather than pushing the
 #: canvas out of the way.
 SELECTOR_WIDTH = 260
+
+#: Where the pop-out window remembers its size and position between sessions.
+#: A fourth local copy of the organisation/application pair, as in ``app.py``,
+#: ``macro.py``, ``status.py`` and ``hkl.py`` -- importing them from ``app.py``
+#: would be circular.
+SETTINGS_ORG = "APS"
+SETTINGS_APP = "id6b-gui"
+GEOMETRY_KEY = "scanplot/window_geometry"
+
+#: Fallback size of the pop-out window the first time it is opened.
+WINDOW_SIZE = (900, 650)
 
 #: Reuses the Scan tab's helper -- its reply is broadcast to every tab, so
 #: asking for it here costs no extra round-trip.
@@ -97,6 +117,34 @@ def _format(value):
     return f"{float(value):.10g}"
 
 
+class _PlotWindow(QWidget):
+    """Top-level window holding the plot while it is detached from the tab.
+
+    Parented to the session window with the ``Qt.Window`` flag rather than left
+    parentless.  A parentless top-level widget keeps the Qt application alive,
+    so closing the session window would leave the process running with an
+    orphaned plot on screen; with a parent, Qt closes and destroys this along
+    with it.
+    """
+
+    #: Emitted from :meth:`closeEvent`, so the tab takes the plot back rather
+    #: than losing it with the window.
+    closing = Signal()
+
+    def __init__(self, parent=None):
+        """Build an empty window with a layout for the plot to be moved into."""
+        super().__init__(parent)
+        self.setWindowFlag(Qt.Window)
+        self.setWindowTitle("Scan plot — 6-ID-B")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+
+    def closeEvent(self, event):
+        """Hand the plot back to the tab before the window goes away."""
+        self.closing.emit()
+        super().closeEvent(event)
+
+
 class ScanPlotTab(BaseTab):
     """Plot the running scan, point by point, one curve per detector field."""
 
@@ -115,8 +163,15 @@ class ScanPlotTab(BaseTab):
 
         self._status = QLabel("Waiting for a scan…")
 
-        layout = QVBoxLayout(self)
-        layout.addWidget(NavigationToolbar(self._canvas, self))
+        # Everything the plot is made of goes in one child widget, so popping
+        # out is a single reparent rather than a rebuild: there is one canvas,
+        # one set of series and one selector panel whether it is showing in the
+        # tab or in its own window, which is what keeps a window opened
+        # mid-scan from starting empty.
+        self._body = QWidget()
+        layout = QVBoxLayout(self._body)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addLayout(self._build_toolbar_row())
         middle = QHBoxLayout()
         middle.addWidget(self._canvas, 1)
         middle.addWidget(self._build_selector_panel(), 0)
@@ -124,6 +179,12 @@ class ScanPlotTab(BaseTab):
         layout.addWidget(self._build_peak_row())
         layout.addWidget(self._status)
 
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._body, 1)
+        outer.addWidget(self._build_detached_notice(), 1)
+
+        self._window = None
         self._monitor_group = None
         self._axis_fields = {}
         self._kernel_idle = False
@@ -132,6 +193,94 @@ class ScanPlotTab(BaseTab):
         self._clear_selectors()
         self._draw_placeholder()
         self._update_peak()
+
+    def _build_toolbar_row(self):
+        """The matplotlib navigation toolbar, with the pop-out button after it."""
+        self._detach_button = QPushButton("Pop out")
+        self._detach_button.setToolTip(
+            "Show the plot in its own window, so it stays visible while you "
+            "work in another tab."
+        )
+        self._detach_button.clicked.connect(self._toggle_window)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(NavigationToolbar(self._canvas, self))
+        row.addStretch(1)
+        row.addWidget(self._detach_button)
+        return row
+
+    def _build_detached_notice(self):
+        """What the tab shows in place of the plot while it is popped out."""
+        label = QLabel("The scan plot is in its own window.")
+        label.setAlignment(Qt.AlignCenter)
+
+        button = QPushButton("Bring it back here")
+        button.clicked.connect(self._reattach)
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        button_row.addWidget(button)
+        button_row.addStretch(1)
+
+        self._notice = QWidget()
+        column = QVBoxLayout(self._notice)
+        column.addStretch(1)
+        column.addWidget(label)
+        column.addLayout(button_row)
+        column.addStretch(1)
+        self._notice.setVisible(False)
+        return self._notice
+
+    # -- pop-out window ---------------------------------------------------
+
+    def _toggle_window(self):
+        """Pop the plot out into its own window, or put it back."""
+        if self._window is None:
+            self._detach()
+        else:
+            self._reattach()
+
+    def _detach(self):
+        """Move the plot into a separate window."""
+        if self._window is not None:
+            return
+        # self.window() is resolved here rather than in __init__, where the tab
+        # is not yet inside the session window and would give the wrong parent.
+        window = _PlotWindow(self.window())
+        window.closing.connect(self._reattach)
+        window.layout().addWidget(self._body)
+
+        geometry = QSettings(SETTINGS_ORG, SETTINGS_APP).value(GEOMETRY_KEY)
+        if geometry is None or not window.restoreGeometry(geometry):
+            window.resize(*WINDOW_SIZE)
+
+        self._window = window
+        self._detach_button.setText("Put it back")
+        self._detach_button.setToolTip("Return the plot to the Scan plot tab.")
+        self._notice.setVisible(True)
+        window.show()
+        window.raise_()
+
+    def _reattach(self):
+        """Move the plot back into the tab and drop the window."""
+        window = self._window
+        if window is None:
+            return
+        # Cleared first: closing the window calls straight back in here through
+        # the closing signal, and this is what makes that second call a no-op.
+        self._window = None
+        QSettings(SETTINGS_ORG, SETTINGS_APP).setValue(
+            GEOMETRY_KEY, window.saveGeometry()
+        )
+        self.layout().insertWidget(0, self._body, 1)
+        self._notice.setVisible(False)
+        self._detach_button.setText("Pop out")
+        self._detach_button.setToolTip(
+            "Show the plot in its own window, so it stays visible while you "
+            "work in another tab."
+        )
+        window.close()
+        window.deleteLater()
 
     def _build_peak_row(self):
         """Peak statistics for one curve, the marker toggle and the four buttons."""
