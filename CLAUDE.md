@@ -1621,6 +1621,36 @@ def align():
   RunEngine `running` from kernel-busy, because a running plan holds the shell
   channel and `RE.state` cannot be polled mid-scan.
 
+  The **Run metadata** group sets the two `RE.md` entries the Session group
+  above only displays — `login_id` (shown as *User*) and `proposal_id` — since
+  changing either otherwise meant typing `RE.md["proposal_id"] = …` in the
+  console, which is neither discoverable nor obviously named. Two fields, one
+  Apply, gated on kernel idle; blank means keep, so changing one of the two is
+  one field. Backed by `_gui_set_metadata` in `kernel.HELPERS_CODE` rather than
+  a bridge module of its own: it is two writes to a dict with no validation
+  surface, next to `_gui_set_kinds` and `_gui_add_extra`.
+
+  - **Neither field is ever written from a poll reply**, and Apply clears both
+    — the *New data file* rule, and the same reason: the poll sets the
+    *placeholder* (`keep commissioning`), so a blank field goes on meaning
+    "keep it" once the value is in force.
+  - **It goes through the console**, not `execute_once()`. It changes what
+    every later run's start document records, which belongs in the history and
+    the transcript.
+  - **A caption says both keys are rewritten at every session start**, because
+    nothing on screen would otherwise reveal it and the loss is silent:
+    `apsbits`' `init_RE` loads the stored `RE.md` and *then* does
+    `RE.md.update(re_metadata(...))` and `RE.md.update(DEFAULT_METADATA)`
+    (`run_engine_init.py:110-112`), so `iconfig.yml`'s `RUN_ENGINE:
+    DEFAULT_METADATA:` wins for `proposal_id` and `re_metadata()` recomputes
+    `login_id` as `getpass.getuser()@socket.gethostname()`
+    (`apsbits/utils/metadata.py:81`). This group is for the current session;
+    `iconfig.yml` is for good.
+  - **The Session group is the read-back**, and it lags: `StoredDict` flushes
+    from a background thread with `delay=5`, so the row follows a few seconds
+    later. The status line says so rather than leaving the delay to look like
+    a failure.
+
   The **New data file** group starts a fresh SPEC file and, with it, a fresh
   scan counter and the sample the data goes under — two fields (Sample, Base
   name), one button. Backed by `gui/spec_bridge.py`; the Files group above it

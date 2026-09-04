@@ -92,6 +92,7 @@ class StatusTab(BaseTab):
                 ],
             )
         )
+        layout.addWidget(self._build_metadata_group())
         layout.addWidget(
             self._group(
                 "Scan",
@@ -128,6 +129,7 @@ class StatusTab(BaseTab):
         self._spec_timer.setInterval(SPEC_PREVIEW_DELAY_MS)
         self._spec_timer.timeout.connect(self._request_spec_preview)
         self._show_spec_preview(None)
+        self._update_metadata_controls()
 
     def _group(self, title, fields):
         box = QGroupBox(title)
@@ -150,6 +152,108 @@ class StatusTab(BaseTab):
             label.setText(PLACEHOLDER)
         else:
             label.setText(str(value))
+
+    # -- run metadata ---------------------------------------------------------
+
+    def _build_metadata_group(self):
+        """Two fields for the user and proposal recorded in every run.
+
+        The Session group above only *shows* them.  They are ``RE.md`` entries,
+        so changing one otherwise means typing ``RE.md["proposal_id"] = ...``
+        in the console -- not discoverable here, and easy to get subtly wrong
+        (the key is ``login_id``, not ``user``).
+
+        Blank means keep, as in the *New data file* group, so changing one of
+        the two is one field and one button.  Neither field is ever written
+        from a poll reply -- it is the user's text and they may still be
+        typing into it; what the poll sets is the placeholder.
+        """
+        box = QGroupBox("Run metadata")
+        form = QFormLayout(box)
+
+        self._md_user = QLineEdit()
+        self._md_user.setPlaceholderText("keep the current user")
+        self._md_user.setToolTip(
+            'RE.md["login_id"], recorded in the start document of every run '
+            "started from now on.  Leave blank to keep it."
+        )
+        self._md_user.textChanged.connect(self._update_metadata_controls)
+        self._md_user.returnPressed.connect(self._apply_metadata)
+        user_row = QHBoxLayout()
+        user_row.addWidget(self._md_user, 1)
+        form.addRow("User:", user_row)
+
+        self._md_proposal = QLineEdit()
+        self._md_proposal.setPlaceholderText("keep the current proposal")
+        self._md_proposal.setToolTip(
+            'RE.md["proposal_id"], recorded in the start document of every '
+            "run started from now on.  Leave blank to keep it."
+        )
+        self._md_proposal.textChanged.connect(self._update_metadata_controls)
+        self._md_proposal.returnPressed.connect(self._apply_metadata)
+        self._md_button = QPushButton("Apply")
+        self._md_button.clicked.connect(self._apply_metadata)
+        proposal_row = QHBoxLayout()
+        proposal_row.addWidget(self._md_proposal, 1)
+        proposal_row.addWidget(self._md_button)
+        form.addRow("Proposal:", proposal_row)
+
+        # Said here rather than left to be discovered next session: both keys
+        # are rewritten at every startup, so this group cannot be the whole
+        # answer for a change meant to last.
+        hint = QLabel(
+            "Applies to runs from now on.  Both are reset at the next session "
+            "start -- proposal_id from iconfig.yml's RUN_ENGINE: "
+            "DEFAULT_METADATA:, login_id from the login -- so edit iconfig.yml "
+            "to change them for good."
+        )
+        hint.setWordWrap(True)
+        hint.setEnabled(False)
+        form.addRow("", hint)
+
+        self._md_status = value_label()
+        self._md_status.setWordWrap(True)
+        status_row = QHBoxLayout()
+        status_row.addWidget(self._md_status, 1)
+        form.addRow("Status:", status_row)
+        return box
+
+    def _update_metadata_controls(self):
+        """Gate Apply on an idle kernel and something to apply."""
+        typed = bool(self._md_user.text().strip() or self._md_proposal.text().strip())
+        idle = self._kernel_state == "idle"
+        self._md_button.setEnabled(typed and idle)
+        if not typed:
+            tip = "Type a user or a proposal.  A blank field keeps what is in force."
+        elif not idle:
+            tip = "The kernel is busy; wait for the current scan to finish."
+        else:
+            tip = "Record these in RE.md, for every run started from now on."
+        self._md_button.setToolTip(tip)
+
+    def _apply_metadata(self):
+        """Apply through the console, not ``execute_once()``.
+
+        This changes what every later run records, so it belongs in the
+        history and the transcript -- the reasoning behind *Start new file*
+        and the HKL tab's Move.
+        """
+        if not self._md_button.isEnabled():
+            return
+        user = self._md_user.text().strip()
+        proposal = self._md_proposal.text().strip()
+        if not self.run_in_console(f"_gui_set_metadata({user!r}, {proposal!r})"):
+            self._md_status.setText("No console available.")
+            return
+        # Cleared, so the placeholders show what is now in force and a blank
+        # field goes back to meaning "keep it".
+        self._md_user.clear()
+        self._md_proposal.clear()
+        self._md_status.setText(
+            "Applied — the Session panel above follows within a few seconds, "
+            "once RE.md reaches disk."
+        )
+        self._update_metadata_controls()
 
     # -- new data file --------------------------------------------------------
 
@@ -577,6 +681,14 @@ class StatusTab(BaseTab):
         self._set("catalog", metadata.get("databroker_catalog"))
         self._set("login_id", metadata.get("login_id"))
         self._set("proposal_id", metadata.get("proposal_id"))
+        login_id = metadata.get("login_id")
+        self._md_user.setPlaceholderText(
+            f"keep {login_id}" if login_id else "keep the current user"
+        )
+        proposal_id = metadata.get("proposal_id")
+        self._md_proposal.setPlaceholderText(
+            f"keep {proposal_id}" if proposal_id else "keep the current proposal"
+        )
         self._set("beamline_id", metadata.get("beamline_id"))
         self._set("instrument_name", metadata.get("instrument_name"))
         self._set("scan_id", metadata.get("scan_id"))
@@ -640,3 +752,4 @@ class StatusTab(BaseTab):
         else:
             self._set("re_state", self._re_state)
         self._update_spec_controls()
+        self._update_metadata_controls()

@@ -385,6 +385,39 @@ def _gui_set_extra_kinds(changes):
         except Exception as _exc:
             print(f"Could not set {_dev}.{_dotted} to {_kind}: {_exc}")
     return applied
+
+
+def _gui_set_metadata(login_id=None, proposal_id=None):
+    """Set the user and proposal recorded in every later run's start document.
+
+    Backs the Session tab's *Run metadata* group.  A blank or omitted value
+    leaves that key alone, so changing one of the two is one field.
+
+    Prints its report and returns None: it goes out through the console, where
+    a return value would only add an ``Out[n]`` above the lines worth reading.
+    """
+    _changed = []
+    for _key, _value in (("login_id", login_id), ("proposal_id", proposal_id)):
+        _value = "" if _value is None else str(_value).strip()
+        if not _value:
+            continue
+        try:
+            RE.md[_key] = _value
+        except Exception as _exc:
+            print(f"Could not set {_key}: {_exc}")
+            continue
+        _changed.append(f"{_key} = {_value!r}")
+
+    if not _changed:
+        print("Run metadata unchanged.")
+        return
+    print("Run metadata: " + ", ".join(_changed))
+    print(
+        "  Recorded in every run started from now on.  Reset at the next "
+        "session start -- proposal_id comes from iconfig.yml's RUN_ENGINE "
+        "DEFAULT_METADATA, login_id is recomputed from the login -- so edit "
+        "iconfig.yml to change them for good."
+    )
 '''
 
 #: RunEngine metadata autosave, resolved against the kernel's working
