@@ -44,6 +44,7 @@ from .atten_bridge import ATTEN_HELPERS_CODE
 from .hkl_bridge import HKL_HELPERS_CODE
 from .pva_bridge import PVA_HELPERS_CODE
 from .session_setup import SESSION_SETUP_CODE
+from .spec_bridge import SPEC_HELPERS_CODE
 
 logger = logging.getLogger(__name__)
 
@@ -397,6 +398,10 @@ KERNEL_EXPRESSIONS = {
     "re_state": "RE.state",
     "spec_file": "str(specwriter.spec_filename)",
     "sample": "experiment.sample",
+    # The Session tab's Files group, and what local_scans builds
+    # <base>_00001_master.hdf from.  A plain attribute read -- the New data
+    # file group's richer preview is a one-off request, not a polled one.
+    "base_name": "experiment.file_base_name",
     "exp_path": "str(experiment.experiment_path)",
     "n_runs": "len(cat)",
     "cwd": "__import__('os').getcwd()",
@@ -582,6 +587,7 @@ class KernelSession(QObject):
             MOTION_HELPERS_CODE,
             ATTEN_HELPERS_CODE,
             PVA_HELPERS_CODE,
+            SPEC_HELPERS_CODE,
         ]
         if follow_up_code:
             parts.append(follow_up_code)

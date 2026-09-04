@@ -508,7 +508,22 @@ def align():                                   # one RE() call, so Ctrl-C stops 
 
 ### Callbacks (`src/id6_b/callbacks/`)
 
-- **`spec_data_file_writer.py`** — SPEC-format data file output (enabled in `iconfig.yml`)
+- **`spec_data_file_writer.py`** — SPEC-format data file output (enabled in
+  `iconfig.yml`). `spec_file_name(title)` is the naming rule on its own —
+  `MM_DD_<cleanupText(title)>.<ext>` — extracted from `newSpecFile` because the
+  GUI's Session tab has to *show* the resolved name before anyone presses the
+  button, and duplicating the rule would give it two owners.
+
+  **The scan counter is one behind, and `scan_id=True` is what resets it.** The
+  next scan is `RE.md["scan_id"] + 1` (`bluesky/run_engine.py:209`), so "the
+  next scan is #1" needs the counter at **0**. `newSpecFile` computes
+  `scan_id or 1`, and `True or 1` is `True`, which
+  `SpecWriterCallback2.newfile` maps to `SCAN_ID_RESET_VALUE` — which is 0.
+  Passing `scan_id=1` would give a first scan numbered 2. On a file that
+  already holds scans, `newfile`'s `scan_id = max(scan_id or 0, highest)` runs
+  first and wins, so the counter follows the file and the reset cannot happen —
+  forcing it would put duplicate `#S` numbers in one file, which is corrupt for
+  spec2nexus. `newSpecFile` logs a warning and appends instead.
 - **`nexus_data_file_writer.py`** — NeXus/HDF5 data file output. Contains `MyNXWriter(NXWriterAPS)` with:
   - `external_files = {}` dict for area-detector HDF5 ExternalLinks (`{det_name: rel_path}`)
   - `write_entry()` — writes `layout_version`, creates `h5py.ExternalLink` entries for each detector, resets `external_files`
@@ -1236,6 +1251,66 @@ def align():
   the poller's `msg_id` as parent — `_drain_iopub` filters it out. Invisible
   from the tab, still useful from the console.
 
+- **`spec_bridge.py`** — `SPEC_HELPERS_CODE`, the kernel-side helpers behind the
+  Session tab's *New data file* group, appended to the bootstrap cell next to
+  the PVA string. Its own module for the same reason `pva_bridge.py` is one.
+
+  It **imports `id6_b.callbacks.spec_data_file_writer` directly** rather than
+  looking the names up in the session namespace, because `startup.py` only
+  binds `newSpecFile` and `specwriter` when `SPEC_DATA_FILES: ENABLE` is true —
+  and a session with the writer switched off is exactly the one that should be
+  told so, rather than raising `NameError`. `_gui_spec_enabled()` reports that
+  flag.
+
+  Three functions matter. `_gui_spec_preview(title, sample=None)` is **pure** —
+  the resolved SPEC path and whether it exists, its `#S` count and highest scan
+  number (via `spec2nexus.spec.SpecDataFile`, the same source `newfile` uses,
+  so the two cannot disagree), the cleaned base name, the experiment path the
+  typed sample would put in force, the `<base>_00001_master.hdf` the next scan
+  would write and whether it is free, and hence the scan number that would come
+  next. `_gui_spec_state()` is what the file, base name, sample and counter are
+  now. `_gui_new_spec_file(title, sample=None)` is the action: it applies the
+  sample, sets `experiment.file_base_name` to the `cleanupText`-cleaned form
+  **and** calls `newSpecFile(title, scan_id=True, RE=RE)`, then prints a plain
+  summary.
+
+  - **One name, both uses.** The base name is set alongside the SPEC file, not
+    separately: it is what `local_scans` builds `<base>_00001_master.hdf` from,
+    and a counter reset with a stale base name walks straight into
+    `_setup_paths`' `FileExistsError` — which it raises whether or not the
+    NeXus writer is enabled. That is why the preview checks the master path
+    too.
+  - **`scan_id` is read live from `RE.md`**, not from `.re_md_dict.yml`, which
+    `StoredDict` writes from a background thread and can be seconds behind. A
+    preview that promises a scan number has to be current.
+  - **The result is read back, not assumed.** The route to counter 0 (see the
+    `spec_data_file_writer.py` bullet) is subtle enough that
+    `_gui_new_spec_file` re-reads `RE.md["scan_id"]` and reports the real next
+    scan number, so a regression shows in the summary line rather than in the
+    data.
+  - **The sample travels with them, for the same reason the base name does.**
+    `experiment_path` is `base_experiment_path / sample` and is the folder the
+    masters go in, so a preview describing the SPEC file against the *typed*
+    base name but the masters against the *old* sample would be answering half
+    the question. Both fields default to what is in force — an empty one means
+    "keep it" — so changing only the sample is one field and one button, and
+    the SPEC file the preview then names is the one already open (the append
+    branch, which is the right answer there).
+  - **A sample containing a separator is refused by name**
+    (`_gui_spec_sample_error`). `Path("/a") / "/etc"` is `/etc`, so an absolute
+    or nested sample silently *escapes* the base path rather than failing —
+    the one input here whose mistake is invisible.
+  - **`experiment.change_sample()` is called when the sample changes**, and
+    `experiment.file_base_name` assigned directly when it does not. That
+    reverses the base-name-only rule on purpose: `change_sample` is wanted here
+    for exactly the two side effects that made it wrong before — it `mkdir`s
+    `<base>/<sample>` and `chdir`s to the base path, and the `chdir` must
+    happen **before** `newSpecFile`, which resolves the SPEC name against the
+    cwd. Its `input()` prompts (stdin is closed in this kernel) are never
+    reached because both arguments are given. A failure — no base path set yet
+    — records the sample anyway rather than losing the whole action over a
+    folder that could not be made.
+
 - **`tabs/devices.py`** — `DevicesTab`, a sortable/filterable table of
   `oregistry.root_devices` (name, class, prefix, labels, connected). Uses
   root devices, not `all_devices`, which also contains every sub-component
@@ -1274,6 +1349,64 @@ def align():
 - **`tabs/status.py`** — `StatusTab`, the Session/Scan/Files overview. Derives
   RunEngine `running` from kernel-busy, because a running plan holds the shell
   channel and `RE.state` cannot be polled mid-scan.
+
+  The **New data file** group starts a fresh SPEC file and, with it, a fresh
+  scan counter and the sample the data goes under — two fields (Sample, Base
+  name), one button. Backed by `gui/spec_bridge.py`; the Files group above it
+  gained a **File base name** row (`experiment.file_base_name`, a plain polled
+  attribute) so what the button set is visible afterwards.
+
+  **Both fields in one group with one button**, rather than a separate sample
+  control, because the Masters line is `<base_experiment_path>/<sample>/
+  <base>_00001_master.hdf` — a sample applied elsewhere would leave this
+  group's preview describing a folder that is no longer the one in force. The
+  preview is computed against the sample *typed*, so it cannot be stale. The
+  base experiment path is deliberately **not** here: changing it also `chdir`s
+  the session, a bigger act, left to `experiment_setup()` in the console.
+
+  - **The preview is a debounced one-off request, not a polled expression.**
+    400 ms after typing stops (a clone of `HklTab._presets_timer`),
+    `BaseTab.request({SPEC_PREVIEW_KEY:
+    f"_gui_spec_preview({title!r}, {sample!r})"})` merges into the next *idle*
+    poll. It depends on what has been typed, and it walks a SPEC file with
+    spec2nexus — not something to do once a second
+    for a field nobody is looking at. A request made while a scan is running
+    waits for idle rather than queueing behind it (`StatusPoller._once` is
+    cleared only on a successful send, and `_poll_kernel` returns early while
+    busy), which is also what makes the after-the-button re-preview work by
+    simply restarting the timer.
+  - **The action goes through the console**
+    (`run_in_console(f"_gui_new_spec_file({title!r}, {sample!r})")`), not
+    `execute_once()`: starting a new file reframes the whole data record, so
+    it belongs in the history and the transcript — the Agent tab's Approve and
+    the HKL tab's Move reasoning.
+  - **Neither field is ever written from a poll reply** — it is the user's
+    text and they may still be typing into it. What the poll *does* set is the
+    **placeholder** (`keep jwkim` / `keep S1`), which is how "blank means keep
+    what is in force" is stated without occupying the field.
+  - **The first preview is primed, not typed for.** `_spec_primed` fires the
+    timer once on the first reply carrying a base name, so the group opens
+    showing the file already open and the sample in force rather than
+    `Type a base name.` The flag is set *before* the timer starts, so a reply
+    that never comes cannot loop.
+  - **The scan-number row is an indicator, not a control.** There is no
+    "append without resetting" option to offer, and on an existing file the
+    counter follows the file whatever anyone ticks. Deliberately **not**
+    `setEnabled(False)` — a disabled widget receives no events, so its
+    tooltip, which is where the reason lives, would never appear. It is
+    enabled and made deaf instead: `WA_TransparentForMouseEvents` stops the
+    mouse, `Qt.NoFocus` stops the space bar, and a `toggled` guard
+    (`_restore_reset_indicator` against `_spec_reset_state`) undoes anything
+    that gets through either — `WA_TransparentForMouseEvents` blocks only
+    *real* mouse events, so a synthetic `click()` still toggles it.
+  - Rendering states the collisions before the button is pressed: the
+    Experiment path line as `— exists` or `— will be created`, the SPEC line
+    as `— new` or `— exists, N scan(s)`, the Masters line as `— free` or
+    `— exists`, and a status line that says plainly `Appending. The next scan
+    will be #5, not #1.` with the remedy, rather than promising a reset that
+    cannot happen. A sample change and a defaulted base name each add their
+    own leading sentence, so the two "blank means keep it" fields never act
+    silently.
 
   The **Console log** group drives the `ConsoleTranscript`: a path field, a
   `Browse…` (`getSaveFileName` with `DontConfirmOverwrite`, since an existing

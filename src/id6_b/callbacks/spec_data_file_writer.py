@@ -7,6 +7,7 @@ custom callbacks
 
     ~newSpecFile
     ~spec_comment
+    ~spec_file_name
     ~specwriter
 """
 
@@ -30,6 +31,19 @@ def spec_comment(comment, doc=None):
     apstools.callbacks.spec_comment(comment, doc, specwriter)
 
 
+def spec_file_name(title):
+    """The file ``newSpecFile(title)`` would use: ``MM_DD_<clean>.<ext>``.
+
+    Its own function because the GUI's Session tab has to *show* the resolved
+    name before anyone presses the button, and it must not have to rebuild the
+    rule -- one owner for the month/day prefix, the
+    :func:`apstools.utils.cleanupText` scrub and the configured extension.
+    """
+    mmdd = str(datetime.datetime.now()).split()[0][5:].replace("-", "_")
+    clean = apstools.utils.cleanupText(title)
+    return pathlib.Path(f"{mmdd}_{clean}.{file_extension}")
+
+
 def newSpecFile(title, scan_id=None, RE=None):
     """
     User choice of the SPEC file name.
@@ -44,9 +58,7 @@ def newSpecFile(title, scan_id=None, RE=None):
     if RE is not None:
         kwargs["RE"] = RE
 
-    mmdd = str(datetime.datetime.now()).split()[0][5:].replace("-", "_")
-    clean = apstools.utils.cleanupText(title)
-    fname = pathlib.Path(f"{mmdd}_{clean}.{file_extension}")
+    fname = spec_file_name(title)
     if fname.exists():
         logger.warning(">>> file already exists: %s <<<", fname)
         handled = "appended"
