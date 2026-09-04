@@ -956,6 +956,23 @@ bootstrap in a Jupyter kernel, so the plain IPython workflow is untouched.
   choosing "monitor counts" (a negative time) disables the detector
   checkboxes and defers to the counters selection.
 
+  **"Unchanged" is measured against `_options["detectors_selected"]`, so that
+  snapshot has to be current.** It used to be re-read only on the *first* idle
+  poll and on `stop` documents, so a `counters()` typed in the console did not
+  reach the tab until the next scan *finished* — and the omit rule was then
+  comparing the boxes against a stale default, which is what decides whether
+  the plan is handed an explicit detector list at all. `on_kernel_state` now
+  refreshes on **every** busy→idle edge; a console command is exactly such an
+  edge, and `_gui_scan_options()` is an in-process walk of `oregistry` that the
+  tab already ran after every scan.
+
+  **A refresh keeps the boxes as the user left them** unless
+  `detectors_selected` itself changed between the two replies. Refreshing an
+  order of magnitude more often would otherwise wipe a deliberate deviation
+  every time anything was typed in the console. When counters really did
+  change, the tab follows counters — the source of truth moved, so showing it
+  is the right answer.
+
   **Three axis rows for `ascan`/`lup`, two for the grid plans** — see
   `scancode.axis_limit()`. Each extra row is revealed by its own check box and
   needs the one before it, so the rows can only ever be filled in order. The
