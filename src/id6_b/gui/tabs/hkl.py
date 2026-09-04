@@ -13,14 +13,18 @@ console** so it appears in history and can be interrupted normally.
 
 import logging
 import time
+from pathlib import Path
 
+from qtpy.QtCore import QSettings
 from qtpy.QtCore import Qt
 from qtpy.QtCore import QTimer
 from qtpy.QtWidgets import QAbstractItemView
 from qtpy.QtWidgets import QAbstractSpinBox
+from qtpy.QtWidgets import QButtonGroup
 from qtpy.QtWidgets import QCheckBox
 from qtpy.QtWidgets import QComboBox
 from qtpy.QtWidgets import QDoubleSpinBox
+from qtpy.QtWidgets import QFileDialog
 from qtpy.QtWidgets import QFormLayout
 from qtpy.QtWidgets import QGridLayout
 from qtpy.QtWidgets import QGroupBox
@@ -31,6 +35,7 @@ from qtpy.QtWidgets import QLineEdit
 from qtpy.QtWidgets import QMessageBox
 from qtpy.QtWidgets import QProgressBar
 from qtpy.QtWidgets import QPushButton
+from qtpy.QtWidgets import QRadioButton
 from qtpy.QtWidgets import QScrollArea
 from qtpy.QtWidgets import QSplitter
 from qtpy.QtWidgets import QTableWidget
@@ -52,6 +57,36 @@ logger = logging.getLogger(__name__)
 CALC_KEY = "hkl_calc"
 #: Reply key for the status string returned by a mutating helper.
 ACTION_KEY = "hkl_action"
+#: Reply key for the listing of configuration files on disk.
+CONFIG_FILES_KEY = "hkl_config_files"
+#: Reply key for the listing of previous scans carrying an orientation.
+CONFIG_SCANS_KEY = "hkl_config_scans"
+
+#: Name rule for a configuration file, the same one
+#: :data:`id6_b.utils.hkl_utils_pete.CONFIG_SUFFIX` applies.  Declared here
+#: rather than imported: importing that module in the *GUI* process builds a
+#: second RunEngine and resolves four devices out of ``oregistry``.
+CONFIG_SUFFIX = "_6idb_config.yml"
+
+#: How many of the newest catalog runs the scan picker inspects.  Each one
+#: costs roughly 40 ms, which is why this is a button and not a poll.
+CONFIG_SCAN_LIMIT = 15
+
+#: Keep the picker to about six rows; the left pane already shares its
+#: width with the 3D model.
+CONFIG_TABLE_HEIGHT = 150
+
+#: Wait this long after dispatching a console command before looking for
+#: the kernel to be idle again.
+CONFIG_RELOAD_MS = 1200
+
+#: Where the last save or browse happened.  A fourth local copy of the
+#: organisation/application names -- ``app.py``, ``macro.py`` and
+#: ``status.py`` each declare their own, and importing from ``app.py``
+#: would be circular.
+SETTINGS_ORG = "APS"
+SETTINGS_APP = "id6b-gui"
+CONFIG_DIR_KEY = "hklconfig/directory"
 
 #: Give the kernel this long to report itself busy before treating "not busy"
 #: as "the move finished".
@@ -126,6 +161,9 @@ class HklTab(BaseTab):
         self._lattice_names = []
         self._calculated = None
         self._loading = False
+        self._config_rows = []
+        self._configs_listed = False
+        self._kernel_cwd = ""
 
         # Coalesces edits to the three psi-reference boxes into one write.
         # Each write briefly switches the diffractometer into a psi_constant
@@ -155,6 +193,17 @@ class HklTab(BaseTab):
         self._move_started_at = 0.0
         self._last_reals = {}
 
+        # Re-read the tab after a configuration was saved or restored in
+        # the console.  run_in_console is fire-and-forget and the kernel
+        # state signal only fires on *transitions*, so a command that
+        # starts and finishes between two 1 Hz polls produces none at all.
+        # This waits for idle by re-arming itself rather than by listening
+        # for an edge.
+        self._reload_timer = QTimer(self)
+        self._reload_timer.setSingleShot(True)
+        self._reload_timer.setInterval(CONFIG_RELOAD_MS)
+        self._reload_timer.timeout.connect(self._reload_after_console)
+
         body = QWidget()
         stack = QVBoxLayout(body)
         stack.addWidget(self._build_header())
@@ -163,6 +212,7 @@ class HklTab(BaseTab):
         stack.addWidget(self._build_mode_group())
         stack.addWidget(self._build_current_group())
         stack.addWidget(self._build_calc_group())
+        stack.addWidget(self._build_config_group())
         stack.addStretch(1)
 
         area = QScrollArea()
@@ -182,6 +232,11 @@ class HklTab(BaseTab):
         layout = QVBoxLayout(self)
         layout.addWidget(split)
         layout.addWidget(self._status)
+
+        # Nothing has been read yet, so nothing may be pressed yet.  Without
+        # this the controls are live for the second before the first poll
+        # answers -- harmless for a combo box, not for Save to file.
+        self._update_enabled()
 
     # -- construction -----------------------------------------------------
 
@@ -525,6 +580,116 @@ class HklTab(BaseTab):
         outer.addLayout(ref)
         return box
 
+    def _build_config_group(self):
+        """Save the orientation to a file, or restore one from file or scan.
+
+        An orientation costs beam time to build and until now could only be
+        saved or restored by typing one of the three functions in
+        ``utils/hkl_utils_pete.py``.  None of them can be called from here:
+        all three block on ``input()`` and this kernel runs with
+        ``allow_stdin=False``.  The group drives the non-interactive core
+        those functions were refactored onto, so the file it writes is the
+        file the console writes.
+        """
+        box = QGroupBox("Configuration")
+        outer = QVBoxLayout(box)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Save the current orientation:"))
+        self._save_config_button = QPushButton("Save to file…")
+        self._save_config_button.clicked.connect(self._save_config)
+        row.addWidget(self._save_config_button)
+        row.addStretch(1)
+        outer.addLayout(row)
+
+        source = QHBoxLayout()
+        source.addWidget(QLabel("Load from:"))
+        self._source_group = QButtonGroup(self)
+        self._file_radio = QRadioButton("File")
+        self._file_radio.setToolTip(
+            f"A *{CONFIG_SUFFIX} file in the session's working directory, "
+            "or any other reached with Browse…"
+        )
+        self._scan_radio = QRadioButton("Previous scan")
+        self._scan_radio.setToolTip(
+            "The orientation saved inside a run by the configuration run "
+            "wrapper.  Not every run carries one.  Runs are listed by uid: "
+            "the scan counter is reset with every new SPEC file, so the "
+            "numbers repeat."
+        )
+        self._file_radio.setChecked(True)
+        for button in (self._file_radio, self._scan_radio):
+            self._source_group.addButton(button)
+            source.addWidget(button)
+        self._config_refresh_button = QPushButton("Refresh")
+        self._config_refresh_button.setToolTip(
+            "Re-read the list.  Not polled: a directory walk, or ~40 ms a run "
+            "for the catalog, is not something to do once a second."
+        )
+        self._config_refresh_button.clicked.connect(self._refresh_configs)
+        source.addWidget(self._config_refresh_button)
+        source.addStretch(1)
+        outer.addLayout(source)
+        # Connected last, so setChecked above cannot fire a listing while the
+        # rest of the group is still being built.
+        self._source_group.buttonToggled.connect(self._on_config_source)
+
+        # One table for both sources, its columns relabelled when the source
+        # changes -- fewer widgets than two tables, and this pane is already
+        # sharing its width with the 3D model.
+        self._config_table = QTableWidget(0, 3)
+        self._config_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._config_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._config_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._config_table.verticalHeader().setVisible(False)
+        self._config_table.setMaximumHeight(CONFIG_TABLE_HEIGHT)
+        self._config_table.itemSelectionChanged.connect(self._update_enabled)
+        outer.addWidget(self._config_table)
+
+        how = QHBoxLayout()
+        self._clear_group = QButtonGroup(self)
+        self._replace_radio = QRadioButton("Replace everything")
+        self._replace_radio.setToolTip(
+            "Discard the samples, reflections and UB in the session and put "
+            "the saved ones in their place."
+        )
+        self._merge_radio = QRadioButton("Add to what's there")
+        self._merge_radio.setToolTip(
+            "Keep the current samples and add the saved ones alongside them.  "
+            "A saved sample with the same name replaces its namesake."
+        )
+        # Replace is the default, matching hklpy2's own restore() and the
+        # console prompt's [o]verwrite.
+        self._replace_radio.setChecked(True)
+        for button in (self._replace_radio, self._merge_radio):
+            self._clear_group.addButton(button)
+            how.addWidget(button)
+        how.addStretch(1)
+        outer.addLayout(how)
+
+        actions = QHBoxLayout()
+        self._load_config_button = QPushButton("Load selected")
+        self._load_config_button.clicked.connect(self._load_config)
+        actions.addWidget(self._load_config_button)
+        self._browse_config_button = QPushButton("Browse…")
+        self._browse_config_button.setToolTip(
+            "Load a configuration file from outside the working directory."
+        )
+        self._browse_config_button.clicked.connect(self._browse_config)
+        actions.addWidget(self._browse_config_button)
+        actions.addStretch(1)
+        outer.addLayout(actions)
+
+        self._config_status = value_label()
+        # Wrapped, or the pane cannot shrink.  value_label() is monospace and
+        # these sentences run past a hundred characters, so an unwrapped label
+        # reports a minimumSizeHint over a thousand pixels wide and drags the
+        # whole HKL tab out with it -- worst on the scan source, whose status
+        # is the longest.
+        self._config_status.setWordWrap(True)
+        outer.addWidget(self._config_status)
+        return box
+
     # -- kernel exchange --------------------------------------------------
 
     @property
@@ -572,9 +737,24 @@ class HklTab(BaseTab):
             self.refresh()
         if CALC_KEY in values:
             self._apply_calculation(values[CALC_KEY])
+        if CONFIG_FILES_KEY in values:
+            self._show_config_files(values[CONFIG_FILES_KEY])
+        if CONFIG_SCANS_KEY in values:
+            self._show_config_scans(values[CONFIG_SCANS_KEY])
+        # The kernel's *live* working directory, which is where a relative
+        # path it is handed would land.  BaseTab.session_cwd is the directory
+        # the kernel was launched in and goes stale the moment anything
+        # chdirs -- starting a new SPEC file does.
+        if values.get("cwd"):
+            self._kernel_cwd = str(values["cwd"])
         # Keep the cheap readout coming while this tab is on screen.
         if self.isVisible() and self._kernel_idle:
             self._request_position()
+        # First listing, once the session is up.  Guarded by the flag rather
+        # than by an idle *transition*, which may already have happened by the
+        # time this tab is built.
+        if self._kernel_idle and not self._configs_listed:
+            self._refresh_configs()
 
     def on_document(self, name, doc):
         """A finished run may have moved the diffractometer."""
@@ -732,11 +912,34 @@ class HklTab(BaseTab):
             *self._ref_boxes.values(),
             *(w for row in self._preset_rows.values() for w in row[:2]),
             *(row[1] for row in self._extra_rows.values()),
+            self._save_config_button,
+            self._config_refresh_button,
+            self._config_table,
+            self._file_radio,
+            self._scan_radio,
+            self._replace_radio,
+            self._merge_radio,
         ):
             widget.setEnabled(editable)
         # Move only after a successful calculation, so the confirmation can
         # only ever show angles the solver actually returned.
         self._move_button.setEnabled(editable and bool(self._calculated))
+
+        # Browse reaches a file, so it means nothing against the scan source.
+        self._browse_config_button.setEnabled(
+            editable and self._config_source() == "file"
+        )
+        # Say why Load is off in its tooltip rather than leaving it to be
+        # discovered by pressing it.
+        selected = self._selected_config() is not None
+        self._load_config_button.setEnabled(editable and selected)
+        if not self._kernel_idle:
+            reason = "Wait until the kernel is idle."
+        elif not selected:
+            reason = "Select a row in the list above first."
+        else:
+            reason = "Restore the selected configuration into this session."
+        self._load_config_button.setToolTip(reason)
 
     # -- actions ----------------------------------------------------------
 
@@ -746,6 +949,10 @@ class HklTab(BaseTab):
         self._update_banner()
         self._status.setText(f"Switched to {self.device}.")
         self.refresh()
+        # The scan listing is summarised for a particular diffractometer, so
+        # it is answering the wrong question now.
+        self._configs_listed = False
+        self._clear_config_table()
 
     def _on_sample_selected(self, _index):
         if self._loading or not self._state:
@@ -1027,3 +1234,278 @@ class HklTab(BaseTab):
         self._progress.setFormat("move complete")
         # Leave the finished bar up briefly so it is not just a flicker.
         QTimer.singleShot(2500, lambda: self._progress.setVisible(False))
+
+    # -- configuration files ----------------------------------------------
+
+    def _config_source(self):
+        """Which of the two load sources is selected."""
+        return "file" if self._file_radio.isChecked() else "scan"
+
+    def _on_config_source(self, _button, checked):
+        """A source radio changed.  Relist against the new one."""
+        # buttonToggled fires twice -- once for the button losing the check,
+        # once for the one gaining it.
+        if not checked:
+            return
+        self._clear_config_table()
+        self._configs_listed = False
+        self._refresh_configs()
+        self._update_enabled()
+
+    def _clear_config_table(self):
+        self._config_rows = []
+        self._config_table.setRowCount(0)
+
+    def _refresh_configs(self):
+        """Ask the kernel for the listing the selected source needs."""
+        if self.poller is None or not self._kernel_idle:
+            return
+        # Set before the reply arrives: the flag means "a listing has been
+        # asked for", which is what stops the first-listing branch in
+        # on_kernel_values firing again on every poll.
+        self._configs_listed = True
+        if self._config_source() == "file":
+            self._config_status.setText("Listing configuration files…")
+            self.request({CONFIG_FILES_KEY: "_gui_hklconf_files()"})
+        else:
+            self._config_status.setText("Reading the catalog…")
+            self.request(
+                {
+                    CONFIG_SCANS_KEY: (
+                        f"_gui_hklconf_scans({self.device!r}, {CONFIG_SCAN_LIMIT})"
+                    )
+                }
+            )
+
+    def _config_summary(self, row):
+        """One cell describing what a configuration holds."""
+        if row.get("error"):
+            return f"! {row['error']}"
+        sample = row.get("sample") or "(no sample)"
+        text = f"{sample} — {row.get('reflections') or 0} reflection(s)"
+        samples = row.get("samples") or 0
+        if samples > 1:
+            text += f", {samples} samples"
+        return text
+
+    def _fill_config_table(self, headers, rows, tooltips):
+        self._config_table.setColumnCount(len(headers))
+        self._config_table.setHorizontalHeaderLabels(headers)
+        self._config_table.setRowCount(len(rows))
+        for r, cells in enumerate(rows):
+            for c, text in enumerate(cells):
+                item = QTableWidgetItem(str(text))
+                item.setToolTip(tooltips[r])
+                self._config_table.setItem(r, c, item)
+        header = self._config_table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self._update_enabled()
+
+    def _show_config_files(self, payload):
+        if not isinstance(payload, dict) or self._config_source() != "file":
+            return  # a reply that arrived after the source changed
+        where = payload.get("directory") or self._kernel_cwd
+        self._kernel_cwd = where or self._kernel_cwd
+        rows = [r for r in (payload.get("files") or []) if isinstance(r, dict)]
+        self._config_rows = rows
+        self._fill_config_table(
+            ["File", "Contents", "Saved"],
+            [
+                (r.get("name", ""), self._config_summary(r), r.get("when", ""))
+                for r in rows
+            ],
+            [str(r.get("path", "")) for r in rows],
+        )
+        if payload.get("error"):
+            self._config_status.setText(f"! {payload['error']}")
+        elif not rows:
+            self._config_status.setText(
+                f"No *{CONFIG_SUFFIX} files in {where or 'the working directory'}. "
+                "Use Browse… to reach one elsewhere."
+            )
+        else:
+            self._config_status.setText(f"{len(rows)} file(s) in {where}.")
+
+    def _show_config_scans(self, payload):
+        if not isinstance(payload, dict) or self._config_source() != "scan":
+            return
+        rows = [r for r in (payload.get("scans") or []) if isinstance(r, dict)]
+        self._config_rows = rows
+        cells = []
+        tips = []
+        for row in rows:
+            uid = str(row.get("uid", ""))
+            summary = self._config_summary(row)
+            if not row.get("matches", True):
+                # The run holds the orientation under another name.  psic and
+                # psic_sim are the same geometry on different motors, so it
+                # still restores; say which one it came from.
+                summary += f"  [{row.get('device', '?')}]"
+            cells.append(
+                (f"#{row.get('scan_id', '?')}  {uid[:8]}", summary, row.get("when", ""))
+            )
+            tips.append(f"{uid}\n{row.get('plan', '')}")
+        self._fill_config_table(["Scan", "Contents", "When"], cells, tips)
+        if payload.get("error"):
+            self._config_status.setText(f"! {payload['error']}")
+        elif not rows:
+            self._config_status.setText(
+                f"None of the newest {CONFIG_SCAN_LIMIT} runs carries an "
+                "hklpy2 orientation."
+            )
+        else:
+            # The uid caveat is on the source radio's tooltip rather than
+            # here: it is the same on every listing, and it is read before
+            # the source is chosen, not after.
+            self._config_status.setText(
+                f"{len(rows)} of the newest {CONFIG_SCAN_LIMIT} runs carry an "
+                "orientation, listed by uid."
+            )
+
+    def _selected_config(self):
+        """The row dict behind the current selection, or None."""
+        index = self._config_table.currentRow()
+        if index < 0 or index >= len(self._config_rows):
+            return None
+        item = self._config_table.item(index, 0)
+        if item is None or not item.isSelected():
+            return None
+        return self._config_rows[index]
+
+    # -- configuration file dialogs ---------------------------------------
+
+    def _config_dir(self):
+        """Where a file dialog should open."""
+        remembered = QSettings(SETTINGS_ORG, SETTINGS_APP).value(
+            CONFIG_DIR_KEY, "", type=str
+        )
+        if remembered and Path(remembered).is_dir():
+            return remembered
+        if self._kernel_cwd and Path(self._kernel_cwd).is_dir():
+            return self._kernel_cwd
+        return str(self.session_cwd or Path.cwd())
+
+    def _remember_config_dir(self, path):
+        QSettings(SETTINGS_ORG, SETTINGS_APP).setValue(
+            CONFIG_DIR_KEY, str(Path(path).parent)
+        )
+
+    def _save_config(self):
+        """Write the current orientation to a file chosen in a dialog."""
+        suggested = str(Path(self._config_dir()) / f"{self.device}{CONFIG_SUFFIX}")
+        path, _selected = QFileDialog.getSaveFileName(
+            self,
+            "Save the diffractometer configuration",
+            suggested,
+            f"Configuration files (*{CONFIG_SUFFIX});;All files (*)",
+        )
+        if not path:
+            return
+        if not path.endswith(CONFIG_SUFFIX):
+            # The console's write_diffractometer_config_file appends the
+            # suffix to whatever base name it is given, and the reader lists
+            # only files carrying it, so a file without it would be written
+            # and then never offered back.  Qt already asked about
+            # overwriting the name that was typed, not this one, so ask again.
+            path += CONFIG_SUFFIX
+            if Path(path).exists():
+                answer = QMessageBox.question(
+                    self,
+                    "Overwrite?",
+                    f"'{Path(path).name}' already exists.\n\nOverwrite it?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if answer != QMessageBox.Yes:
+                    self._config_status.setText("Save cancelled.")
+                    return
+        self._remember_config_dir(path)
+        # Absolute, always: the kernel resolves a relative path against its
+        # own live working directory, which is not necessarily this one.
+        code = f"_gui_hklconf_save({self.device!r}, {str(Path(path).resolve())!r})"
+        if self.run_in_console(code):
+            self._config_status.setText(f"Saving: {code}")
+            self._reload_timer.start()
+        else:
+            self._config_status.setText("No console available to save.")
+
+    def _browse_config(self):
+        """Load a configuration file from outside the working directory."""
+        path, _selected = QFileDialog.getOpenFileName(
+            self,
+            "Load a diffractometer configuration",
+            self._config_dir(),
+            f"Configuration files (*{CONFIG_SUFFIX});;All files (*)",
+        )
+        if not path:
+            return
+        self._remember_config_dir(path)
+        # Nothing has read this file, so there is no summary to show; the
+        # confirmation names it and leaves it at that.
+        self._confirm_and_load({"path": path, "name": Path(path).name}, "file")
+
+    def _load_config(self):
+        row = self._selected_config()
+        if row is not None:
+            self._confirm_and_load(row, self._config_source())
+
+    def _confirm_and_load(self, row, source):
+        """Confirm, then restore the configuration in *row* via the console."""
+        clear = self._replace_radio.isChecked()
+        # Not "REAL MOTORS WILL MOVE" -- nothing moves.  What it does change
+        # is where every later move goes, which is worth its own warning.
+        warning = "REAL DIFFRACTOMETER.\n\n" if self.device == "psic" else ""
+        if source == "file":
+            what = f"    {row.get('name') or row.get('path')}"
+        else:
+            what = f"    scan #{row.get('scan_id', '?')}  ({row.get('uid', '')})"
+        summary = ""
+        if row.get("sample"):
+            summary = f"\n    {self._config_summary(row)}"
+        how = (
+            "Replace everything: the samples, reflections and UB in the "
+            "session now are discarded."
+            if clear
+            else "Add to what is there: the current samples are kept, and a "
+            "saved sample with the same name replaces its namesake."
+        )
+        answer = QMessageBox.question(
+            self,
+            "Load configuration",
+            f"{warning}Load into {self.device} from\n\n"
+            f"{what}{summary}\n\n"
+            f"{how}\n\n"
+            "UB is recomputed from the restored reflections rather than "
+            "taken from the saved matrix.  The wavelength and the mode are "
+            "left as they are.  The command runs in the console.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            self._config_status.setText("Load cancelled.")
+            return
+        if source == "file":
+            target = str(Path(row["path"]).resolve())
+            code = f"_gui_hklconf_load_file({self.device!r}, {target!r}, {clear!r})"
+        else:
+            code = (
+                f"_gui_hklconf_load_scan({self.device!r}, "
+                f"{str(row.get('uid', ''))!r}, {clear!r})"
+            )
+        if self.run_in_console(code):
+            self._config_status.setText(f"Loading: {code}")
+            self._reload_timer.start()
+        else:
+            self._config_status.setText("No console available to load.")
+
+    def _reload_after_console(self):
+        """Re-read the tab once the console command has finished."""
+        if not self._kernel_idle:
+            self._reload_timer.start()
+            return
+        self.refresh()
+        self._configs_listed = False
+        self._refresh_configs()

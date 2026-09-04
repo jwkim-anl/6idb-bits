@@ -42,6 +42,7 @@ from ..mcp_server.motion import MOTION_HELPERS_CODE
 from ..mcp_server.session import POINTER_NAME
 from .atten_bridge import ATTEN_HELPERS_CODE
 from .hkl_bridge import HKL_HELPERS_CODE
+from .hkl_config_bridge import HKL_CONFIG_HELPERS_CODE
 from .pva_bridge import PVA_HELPERS_CODE
 from .session_setup import SESSION_SETUP_CODE
 from .spec_bridge import SPEC_HELPERS_CODE
@@ -583,6 +584,7 @@ class KernelSession(QObject):
             BOOTSTRAP_CODE,
             HELPERS_CODE,
             HKL_HELPERS_CODE,
+            HKL_CONFIG_HELPERS_CODE,
             MCP_HELPERS_CODE,
             MOTION_HELPERS_CODE,
             ATTEN_HELPERS_CODE,

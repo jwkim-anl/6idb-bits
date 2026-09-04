@@ -1028,8 +1028,9 @@ def align():
 - **`hkl_bridge.py` + `tabs/hkl.py`** — `HklTab`: samples and lattices,
   reflection table (editable h/k/l and angles) with first/second orienting
   selection, Compute UB, mode selection, live current-position readout
-  (h k l, six angles, 2θ, ψ, ψ reference, λ/energy) and an hkl → angles
-  calculator with a Move button. A selector chooses `psic` (red "real motors"
+  (h k l, six angles, 2θ, ψ, ψ reference, λ/energy), an hkl → angles
+  calculator with a Move button, and a Configuration group that saves and
+  restores the whole orientation. A selector chooses `psic` (red "real motors"
   banner) or `psic_sim` (green "simulated").
 
   `hkl_bridge.HKL_HELPERS_CODE` holds the kernel-side `_gui_hkl_*` functions,
@@ -1156,6 +1157,86 @@ def align():
   history, and Ctrl-C aborts it. Move stays disabled until a successful
   Calculate, so the confirmation can only show angles the solver returned.
   Reflections are edited in place (`Reflection.pseudos`/`.reals` are settable).
+
+  **The Configuration group** is the last section of the stack: one button to
+  write the current orientation to a `*_6idb_config.yml` file, and a load path
+  with two sources — a file on disk, or the orientation
+  `ConfigurationRunWrapper` saved inside a previous scan. It exists because an
+  orientation costs real beam time to build and could previously only be saved
+  or restored by typing one of three console functions, none of which is
+  discoverable from the GUI and **none of which can be called from it** (they
+  block on `input()`). Backed by `gui/hkl_config_bridge.py`.
+
+  ```
+  Configuration
+    Save the current orientation:  [ Save to file… ]
+    Load from:  (•) File   ( ) Previous scan          [ Refresh ]
+    ┌──────────────────────────────────────────────────────────┐
+    │ si_6idb_config.yml     Si — 2 reflection(s)   09-04 14:22│
+    └──────────────────────────────────────────────────────────┘
+    (•) Replace everything   ( ) Add to what's there
+    [ Load selected ]  [ Browse… ]
+    status line
+  ```
+
+  It stays in this file rather than becoming its own widget module: unlike
+  `Diffract3DPanel` it is not a pure view — it needs the tab's `device`,
+  `_kernel_idle`, `request()`, `run_in_console()` and `refresh()`.
+
+  - **One `QTableWidget` shared by both sources**, its columns rebuilt when
+    the source radio changes — fewer widgets than two tables, and the left
+    pane is already narrow (a 3:2 splitter against the 3D panel). Column 1
+    (Contents) stretches; the other two size to their contents, with
+    `setStretchLastSection(False)` so the last one does not absorb the width.
+  - **A reply for the source that is no longer selected is discarded.**
+    `_show_config_files` / `_show_config_scans` each return early unless
+    `_config_source()` still names them: the listing is a one-off request and
+    the radio can change while it is in flight.
+  - **Listings are one-off requests, never polled** — a directory walk plus a
+    YAML parse per file, and ~40 ms per catalog run, is what `tabs/status.py`
+    describes as not something to do once a second for a group nobody is
+    looking at. `_configs_listed` fires the first one when the kernel first
+    reports idle, and is cleared by the Refresh button, by a change of source
+    and by a change of diffractometer.
+  - **Replace vs merge is an explicit radio pair**, mirroring the console's
+    `[o]verwrite/[a]ppend` prompt, with the choice repeated in the
+    confirmation dialog. Replace is the default, matching hklpy2's own
+    `restore()` default.
+  - **The confirmation says `REAL DIFFRACTOMETER.`, not `REAL MOTORS WILL
+    MOVE.`** — nothing moves on a restore. What it does change is where every
+    later move goes, which is worth its own warning rather than a borrowed
+    one. The body also states that UB is recomputed from the restored
+    reflections rather than taken from the saved matrix, and that the
+    wavelength and mode are left alone.
+  - **Load and Save go through the console**, not `_act()`: restoring an
+    orientation reframes everything the tab shows, so it belongs in the
+    history and the transcript — the reasoning behind Move and the Session
+    tab's New data file.
+  - **The post-console reload is a self-re-arming `QTimer`**, not the idle
+    edge. `run_in_console` is fire-and-forget and `kernel_state_changed` fires
+    only on *transitions*, so a command that starts and finishes between two
+    1 Hz polls produces none at all; `_reload_after_console` re-arms itself
+    while the kernel is busy and then calls `refresh()` and relists.
+  - **The Save dialog appends `CONFIG_SUFFIX` and then asks again.** The
+    console's writer appends the suffix to whatever base name it is given and
+    the reader lists only files carrying it, so a file without it would be
+    written and then never offered back. Qt's own overwrite prompt has
+    already been answered about the name that was *typed*, not the one with
+    the suffix on it, hence a second `QMessageBox.question` when the appended
+    path exists.
+  - **File dialogs are seeded from the polled `"cwd"`, never
+    `BaseTab.session_cwd`**, which is the directory the kernel was *launched*
+    in and goes stale the moment anything chdirs — and `_gui_new_spec_file`
+    chdirs. The last-used directory is remembered in
+    `QSettings("APS", "id6b-gui")` under `hklconfig/directory`, the
+    `macro.py` pattern (`type=str` read, `is_dir()` validation, store the
+    chosen file's *parent*).
+  - **`_update_enabled()` is called at the end of `__init__`.** Everything
+    here is gated on `editable = self._kernel_idle and bool(self._state)`,
+    but nothing called it before the first poll answered, so the controls
+    were live for that second — harmless for a combo box, not for Save to
+    file. Load additionally needs a selected row, and the reason it is
+    disabled is in its tooltip rather than discovered by pressing it.
 - **`tabs/detectors.py`** — `DetectorsTab`, a per-channel `Kind` selector
   grouped by detector. Unlike the Scan plot check boxes, which only hide
   already-recorded curves, this changes kernel-side configuration and so what
@@ -1385,6 +1466,60 @@ def align():
     reached because both arguments are given. A failure — no base path set yet
     — records the sample anyway rather than losing the whole action over a
     folder that could not be made.
+
+- **`hkl_config_bridge.py`** — `HKL_CONFIG_HELPERS_CODE`, the kernel-side
+  helpers behind the HKL tab's *Configuration* group: save the current
+  orientation to a file, and load one back from a file or from a previous
+  scan. Its own module for the reason `spec_bridge.py` is one, and
+  deliberately **not** appended to `hkl_bridge.py`, whose helper string ends
+  `''' % {...}` so every literal `%` inside it has to be doubled.
+
+  Everything routes through the three non-interactive functions in
+  `utils/hkl_utils_pete.py` (above), so the GUI writes the file the console
+  writes and restores it the way the console does. The console's own three
+  functions cannot be called from here at all — they block on `input()`, and
+  the GUI kernel runs with `allow_stdin=False`.
+
+  Two reads, `_gui_hklconf_files(directory=None)` and
+  `_gui_hklconf_scans(device, limit=15)`; three actions,
+  `_gui_hklconf_save` / `_gui_hklconf_load_file` / `_gui_hklconf_load_scan`.
+  **The actions `print()` their report and return `None`** — they go out
+  through `run_in_console()`, and a return value would only add an `Out[n]`
+  above the lines worth reading. `_recompute_ub`'s `!` warning ("restored, but
+  UB was kept: fewer than two orienting reflections") reaches the console for
+  free, since it prints its own.
+
+  - **`hkl_utils_pete` is imported lazily, inside each helper.** Its module
+    scope builds a second `RunEngine` and resolves four devices out of
+    `oregistry`, so it must never be imported at GUI-process import time; in
+    the kernel `startup.py` has already imported it, so the lazy import is
+    free.
+  - **The helpers act on the diffractometer they are given**, never on
+    hklpy2's process-global `get_diffractometer()` — which is set to the real
+    `psic` when `hkl_utils_pete` is imported, while the tab has its own
+    `psic`/`psic_sim` selector.
+  - **Scans are keyed by uid, not by scan number.** The counter is reset with
+    every new SPEC file, so this catalog already holds several runs numbered
+    1; a picker keyed on the number would silently resolve to the most recent
+    match with nothing on screen saying which run it used.
+  - **A run holding the orientation under the other name is still offered**,
+    with `matches` False so the row can say so. `psic` and `psic_sim` are the
+    same E6C geometry with the same axis names, so a simulator configuration
+    restores onto the real device and the other way round. A run holding
+    *several* is refused by name, listing them.
+  - **Paths arrive absolute.** A relative one is resolved against the
+    kernel's *live* working directory, which is not the one the GUI was
+    launched in — `_gui_new_spec_file` chdirs — so the saver refuses one
+    rather than writing somewhere nobody asked for. The file listing reports
+    the `os.getcwd()` it actually used.
+  - **A file that will not parse is listed with its error, not dropped.** It
+    is still on disk, and saying why it cannot be offered beats leaving the
+    operator to wonder where it went. One unreadable *run*, by contrast, is
+    skipped — it must not cost the whole catalog listing.
+  - `_GUI_HKLCONF_MAX_ROWS` (200) is the same backstop `atten_bridge.py`
+    documents: IPython's pretty printer writes a literal `...` into a
+    sequence past 1000 items, which reaches the GUI as an `Ellipsis` and
+    raises inside Qt.
 
 - **`tabs/devices.py`** — `DevicesTab`, a sortable/filterable table of
   `oregistry.root_devices` (name, class, prefix, labels, connected). Uses
