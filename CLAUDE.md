@@ -6,12 +6,38 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is the **6-ID-B beamline** Bluesky data acquisition instrument package, built on the [BITS (Bluesky Instrument Template System)](https://BCDA-APS.github.io/BITS/) framework from APS (Advanced Photon Source). The main installable package is `polar-bits` (Python ≥3.11), and the instrument module is `id6_b`.
 
+Forked from [BCDA-APS/6idb-bits](https://github.com/BCDA-APS/6idb-bits), this
+repository adds two things the upstream starter does not have, both **purely
+additive** — the plain `ipython`/Jupyter workflow is untouched:
+
+- **`id6b-gui`** — a Qt session window: parameter tabs above a real IPython
+  console. See "GUI" under Architecture.
+- **`id6b-mcp`** — an MCP server that lets an LLM drive the experiment in
+  words, with motion behind a human-approval gate. See "MCP server" under
+  Architecture.
+
+User-facing documentation for both lives in `README.md`; the sections below are
+the *why* behind the code, for editing it.
+
 ## Environment Setup
 
 ```bash
 conda activate 6idb-bits
 pip install -e .[all]     # install with dev + doc extras
 ```
+
+**`all` is not all.** It expands to `dev,doc` only; the two feature extras are
+separate and neither is installed by default:
+
+```bash
+pip install -e ".[mcp]"     # the id6b-mcp server (the `mcp` SDK)
+pip install -e ".[gui3d]"   # the HKL tab's 3D view (vtk, pyvista, pyvistaqt)
+```
+
+Both are gated at import, so the GUI and the kernel-side dispatcher work
+without either. Adding a console script to an *existing* editable checkout
+needs `pip install -e . --no-deps --no-build-isolation`, or `id6b-mcp` will not
+appear on `PATH`.
 
 ## Common Commands
 
@@ -40,6 +66,14 @@ python -m id6_b.gui.app  # equivalent, no reinstall needed
 ```
 Runs the same `from id6_b.startup import *` bootstrap in a Jupyter kernel, so
 the IPython workflow above is unaffected. See "GUI" under Architecture.
+
+**Start the MCP server (attaches to a running GUI session):**
+```bash
+id6b-mcp                                  # discovers .id6b-gui-kernel.json upwards from cwd
+id6b-mcp --connection-file <pointer>      # or ID6B_GUI_KERNEL_FILE=<pointer>
+```
+Stdio only — a client spawns it as a child process; there is no port. The GUI
+must already be running. See "MCP server" under Architecture.
 
 **Verify installation with sim plans (inside IPython/notebook after startup):**
 ```python
@@ -2009,7 +2043,7 @@ Four layers, split so the middle two are testable before the SDK exists:
   raises — transport failures come back in the same `{"ok", "message", "data"}`
   shape as a refusal, so a caller does not have to tell them apart by type.
 
-- **`server.py`** — the protocol layer: 29 tools, each one line into
+- **`server.py`** — the protocol layer: 31 tools, each one line into
   `HklSession.call`, plus `build()` and `main()` (the `id6b-mcp` console
   script). Under `[project.scripts]`, **not** `[project.gui-scripts]`, which on
   Windows builds a console-less launcher whose stdout — the protocol channel —
