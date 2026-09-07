@@ -30,22 +30,29 @@ from qtpy.QtWidgets import QTabWidget
 from qtpy.QtWidgets import QToolBar
 from qtpy.QtWidgets import QWidget
 
+from ..mcp_server.bridge import ECHO_PREFIX as LLM_ECHO_PREFIX
 from .docstream import DocumentStream
 from .kernel import KernelSession
 from .kernel import StatusPoller
+from .tabs.agent import AgentTab
 from .tabs.detectors import DetectorsTab
 from .tabs.devices import DevicesTab
 from .tabs.hkl import HklTab
 from .tabs.macro import MacroTab
 from .tabs.scan import ScanTab
 from .tabs.scanplot import ScanPlotTab
+from .tabs.status import DEFAULT_LOG_NAME
+from .tabs.status import LOG_ENABLED_KEY
+from .tabs.status import LOG_PATH_KEY
 from .tabs.status import StatusTab
+from .transcript import ConsoleTranscript
 
 logger = logging.getLogger(__name__)
 
 #: Tabs shown in the upper pane, in order.  Add new BaseTab subclasses here.
 TABS = [
     StatusTab,
+    AgentTab,
     ScanTab,
     MacroTab,
     ScanPlotTab,
@@ -93,6 +100,9 @@ class MainWindow(QMainWindow):
         self.session = KernelSession(cwd)
         manager, client = self.session.start()
 
+        # Set by _build_tabs() if the Agent tab is in TABS; the restart path
+        # has to be able to disarm it whether or not it is.
+        self._agent_tab = None
         self.console = self._build_console(manager, client)
         self.tabs, self._tab_widgets = self._build_tabs()
 
@@ -114,7 +124,15 @@ class MainWindow(QMainWindow):
         self.docstream.document.connect(self._on_document)
         self.docstream.start()
 
+        # Appends the console's traffic to a file.  Built before the poller, so
+        # the very first drain of iopub -- which already holds everything the
+        # bootstrap has printed -- has somewhere to go.
+        self.transcript = ConsoleTranscript()
+        self._resume_transcript(cwd)
+
         self.poller = StatusPoller(self.session, parent=self)
+        self.poller.iopub_message.connect(self.transcript.handle)
+        self.poller.iopub_message.connect(self._echo_llm)
         # Lets a tab request an occasional one-off expression, and run code
         # visibly in the console for anything with real consequence (see
         # BaseTab).
@@ -122,6 +140,12 @@ class MainWindow(QMainWindow):
             tab.poller = self.poller
             tab.console_execute = self.console.execute
             tab.session_cwd = cwd
+            tab.transcript = self.transcript
+            # The Session tab owns the log controls, and has to be told once
+            # the transcript exists -- by then it may already be running.
+            sync = getattr(tab, "sync_transcript", None)
+            if sync is not None:
+                sync()
         self.poller.metadata_changed.connect(self._on_metadata)
         self.poller.kernel_values_changed.connect(self._on_kernel_values)
         self.poller.kernel_state_changed.connect(self._on_kernel_state)
@@ -131,6 +155,48 @@ class MainWindow(QMainWindow):
         # bootstrap from _do_restart() via the same ready handshake.
         self.session.ready.connect(self._on_kernel_ready)
         self.session.wait_until_ready()
+
+    def _echo_llm(self, msg):
+        """Show an MCP client's changes in the console, as they happen.
+
+        The MCP server (:mod:`id6_b.mcp_server`) talks to this kernel on its
+        own client, so nothing it does would otherwise appear in front of the
+        operator.  Its dispatcher prints one ``[LLM]`` line per change, and
+        this puts that line in the console.
+
+        Driven from ``iopub_message`` rather than by setting qtconsole's
+        ``include_other_output``: ``BaseFrontendMixin.from_here()`` compares
+        **session** ids, not message ids, so that trait would also echo the
+        status poller's empty cell as ``[remote] In [n]:`` once a second.  The
+        session check below is what stops a ``_gui_mcp(...)`` call typed by
+        hand in the console from being printed twice.
+        """
+        if msg.get("msg_type") != "stream":
+            return
+        text = (msg.get("content") or {}).get("text") or ""
+        if not text.startswith(LLM_ECHO_PREFIX):
+            return
+        origin = (msg.get("parent_header") or {}).get("session")
+        if origin and origin == self.console.kernel_client.session.session:
+            return  # already on screen: the console asked for it itself
+        self.console.append_stream(text)
+
+    def _resume_transcript(self, cwd):
+        """Restart console logging where the last session left it.
+
+        Without this the ~40 s device-loading log -- the part of a session
+        nobody is watching and everybody wants afterwards -- would only ever be
+        captured by someone who pressed Start within seconds of launching.  A
+        failed start is left to the Session tab to report; it must not stop the
+        window from opening.
+        """
+        settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
+        if not settings.value(LOG_ENABLED_KEY, False, type=bool):
+            return
+        path = settings.value(LOG_PATH_KEY, "", type=str)
+        if not path:
+            path = os.path.join(cwd, DEFAULT_LOG_NAME)
+        self.transcript.start(path)
 
     def _on_kernel_ready(self):
         """Bootstrap Bluesky and begin polling, once the kernel can answer."""
@@ -164,6 +230,13 @@ class MainWindow(QMainWindow):
         widgets = []
         for tab_class in TABS:
             tab = tab_class()
+            if isinstance(tab, AgentTab):
+                # A move waiting behind another tab is a move nobody approves.
+                self._agent_tab = tab
+                index = len(widgets)
+                tab.request_arrived.connect(
+                    lambda idx=index: self.tabs.setCurrentIndex(idx)
+                )
             if tab.scrollable:
                 # Without this the tallest page sets the tab widget's minimum
                 # height (595 px with these tabs) and the splitter can never
@@ -281,18 +354,39 @@ class MainWindow(QMainWindow):
         self.font_spin.blockSignals(blocked)
         QSettings(SETTINGS_ORG, SETTINGS_APP).setValue(FONT_SIZE_KEY, points)
 
-    def _on_metadata(self, metadata):
+    def _dispatch(self, hook, *args):
+        """Call *hook* on every tab, surviving one that raises.
+
+        These run inside Qt slots on the 1 Hz poll, and an exception escaping
+        a slot does not merely fail the update: PyQt aborts the process, which
+        takes the kernel and the running experiment with it. That is far too
+        much to lose to a display bug in one tab -- a malformed reply once
+        killed a live session through ``QComboBox.addItems``. Log it, tell the
+        status bar, and let the other tabs update.
+        """
         for tab in self._tab_widgets:
-            tab.on_metadata(metadata)
+            try:
+                getattr(tab, hook)(*args)
+            except Exception:
+                logger.exception(
+                    "%s.%s failed; the other tabs were still updated.",
+                    type(tab).__name__,
+                    hook,
+                )
+                self.state_label.setText(
+                    f"{getattr(tab, 'title', type(tab).__name__)} tab failed to "
+                    "update — see the log."
+                )
+
+    def _on_metadata(self, metadata):
+        self._dispatch("on_metadata", metadata)
 
     def _on_kernel_values(self, values):
-        for tab in self._tab_widgets:
-            tab.on_kernel_values(values)
+        self._dispatch("on_kernel_values", values)
 
     def _on_kernel_state(self, state):
         self.state_label.setText(_STATE_TEXT.get(state, f"kernel: {state}"))
-        for tab in self._tab_widgets:
-            tab.on_kernel_state(state)
+        self._dispatch("on_kernel_state", state)
 
     def _on_restart_clicked(self):
         answer = QMessageBox.question(
@@ -320,6 +414,14 @@ class MainWindow(QMainWindow):
         """
         self.poller.stop()
         self.poller.reset()
+        if self._agent_tab is not None:
+            # The kernel holding the pending request is going away, and an auto
+            # window armed against the old session must not carry into the new
+            # one -- the operator armed it for work that no longer exists.
+            self._agent_tab.clear_auto_mode()
+        # The console is about to be wiped; the log is not, so leave a marker
+        # explaining why the transcript jumps back to In [1].
+        self.transcript.note("kernel restarted")
         self.session.restart()
         # Autorestart is off, so qtconsole does not clear the console for us.
         self.console.reset(clear=True)
@@ -340,6 +442,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):  # noqa: N802 - Qt naming
         """Stop polling and shut the kernel down so none is left orphaned."""
         self.poller.stop()
+        self.transcript.stop()
         self.docstream.stop()
         for tab in self._tab_widgets:
             shutdown = getattr(getattr(tab, "model3d", None), "shutdown", None)

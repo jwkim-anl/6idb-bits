@@ -39,11 +39,52 @@ def _gui_hkl_dev(name):
     return oregistry.find(name)
 
 
+def _gui_hkl_lattice(sample):
+    """The six lattice constants of *sample*, as plain floats."""
+    return {
+        _p: _gui_hkl_f(getattr(sample.lattice, _p))
+        for _p in ("a", "b", "c", "alpha", "beta", "gamma")
+    }
+
+
+def _gui_hkl_mirror_sample(src, dst):
+    """Copy *src*'s lattice and UB onto *dst*, the psi helper geometry.
+
+    Both halves are needed.  The psi engine solves against *dst*'s own
+    sample, which starts life as a default cubic one, and hklpy2 pushes the
+    whole sample -- lattice included -- to the solver; a UB copied onto a
+    mismatched lattice gives a psi computed for the wrong crystal.
+
+    **Lattice before UB.**  Assigning a lattice parameter flags
+    ``_SolverDirty.SAMPLE | _SolverDirty.UB`` because some backends discard
+    U/UB when the sample is re-pushed, so the other order can throw the
+    matrix away again.
+
+    Each half is skipped when it already matches: this runs on the 1 Hz
+    position poll and every assignment flags the solver dirty, forcing a
+    re-sync that is pure cost when nothing changed.
+
+    The lattice is copied parameter by parameter rather than by assigning
+    ``src.sample.lattice`` itself: ``Sample.lattice``'s setter rebinds
+    ``_on_change`` on whatever object it is given, so sharing one Lattice
+    would redirect the source sample's own change notification to *dst*.
+    """
+    want = _gui_hkl_lattice(src.sample)
+    if _gui_hkl_lattice(dst.sample) != want:
+        for _p, _v in want.items():
+            if _v is not None:
+                setattr(dst.sample.lattice, _p, _v)
+    ub = [[_gui_hkl_f(_v) for _v in _row] for _row in src.sample.UB]
+    if [[_gui_hkl_f(_v) for _v in _row] for _row in dst.sample.UB] != ub:
+        dst.sample.UB = ub
+
+
 def _gui_hkl_derived(dev):
     """Return (two_theta, psi, psi_reference) using the helper geometries.
 
     Mirrors ``hkl_utils_pete._wh()``: the psi geometry needs the main
-    diffractometer's UB copied onto it before ``inverse()`` means anything.
+    diffractometer's sample copied onto it before ``inverse()`` means
+    anything.
     """
     import math
 
@@ -61,7 +102,7 @@ def _gui_hkl_derived(dev):
         pass
     try:
         _p = _gui_hkl_dev("%(psi)s")
-        _p.sample.UB = dev.sample.UB
+        _gui_hkl_mirror_sample(dev, _p)
         psi = _gui_hkl_f(_p.inverse(0).psi)
         reference = {k: _gui_hkl_f(v) for k, v in _p.core.extras.items()}
     except Exception:
@@ -166,6 +207,14 @@ def _gui_hkl_state(name):
         state["extras"] = {k: _gui_hkl_f(v) for k, v in dev.core.extras.items()}
     except Exception:
         state["extras"] = {}
+    # The mode's extra solver parameters, minus the psi reference vector,
+    # which has its own boxes.  In a psi_constant mode this is ['psi'] -- a
+    # value the mode holds constant just as surely as it holds mu and nu, but
+    # one that never appears in ``constant_axis_names`` because it is not a
+    # real axis.  The tab shows these alongside the fixed angles.
+    state["extra_axes"] = [
+        k for k in state["extras"] if k not in ("h2", "k2", "l2")
+    ]
     try:
         state["ub"] = [[_gui_hkl_f(v) for v in row] for row in dev.sample.UB]
     except Exception:
@@ -305,12 +354,114 @@ def _gui_hkl_compute_ub(name):
         return f"Could not compute UB: {exc}"
 
 
+def _gui_hkl_presets_text(dev):
+    """Render the current mode's presets the way the tab shows them."""
+    try:
+        items = dict(dev.core.presets)
+    except Exception:
+        return "unavailable"
+    return ", ".join(f"{k}={v:g}" for k, v in items.items()) or "none"
+
+
+def _gui_hkl_set_presets(name, values):
+    """Fix (preset) the angles the current mode holds constant.
+
+    ``values`` is ``{axis: number}``; an axis left out has no preset, so
+    ``forward()`` falls back to that motor's live position.  Presets change
+    *computed* solutions only -- nothing moves.
+
+    hklpy2's ``presets`` setter silently drops any axis that is not constant
+    in the current mode, so the names it would have dropped are checked here
+    and reported back rather than disappearing without a word.
+    """
+    dev = _gui_hkl_dev(name)
+    try:
+        constant = list(dev.core.constant_axis_names)
+    except Exception as exc:
+        return f"Could not read the constant axes: {exc}"
+    try:
+        wanted = {k: float(v) for k, v in (values or {}).items()}
+    except Exception as exc:
+        return f"Fixed angles must be numbers: {exc}"
+    ignored = [k for k in wanted if k not in constant]
+    try:
+        dev.core.presets = {k: v for k, v in wanted.items() if k in constant}
+    except Exception as exc:
+        return f"Could not set the fixed angles: {exc}"
+    message = f"Fixed angles ({dev.core.mode}): {_gui_hkl_presets_text(dev)}"
+    if ignored:
+        message += (
+            " -- ignored " + ", ".join(sorted(ignored))
+            + ", not held constant in this mode"
+        )
+    return message
+
+
+def _gui_hkl_set_extras(name, values):
+    """Set the current mode's extra solver parameters, e.g. psi.
+
+    An extra is not a preset.  A preset is optional -- an axis left out of
+    ``core.presets`` follows its motor -- whereas a mode that defines an
+    extra always uses it, so there is nothing to leave out and no checkbox
+    to untick.
+
+    hklpy2 *raises* ``ConfigurationError`` on an extra the current mode does
+    not define, so the names are filtered against ``core.extras`` first: a
+    psi sent in the wrong mode is reported rather than taking the whole
+    write down with it.
+    """
+    dev = _gui_hkl_dev(name)
+    try:
+        known = list(dev.core.extras)
+    except Exception as exc:
+        return f"Could not read the extra parameters: {exc}"
+    try:
+        wanted = {k: float(v) for k, v in (values or {}).items()}
+    except Exception as exc:
+        return f"Extra parameters must be numbers: {exc}"
+    ignored = sorted(k for k in wanted if k not in known)
+    accepted = {k: v for k, v in wanted.items() if k in known}
+    if accepted:
+        try:
+            dev.core.extras = accepted
+        except Exception as exc:
+            return f"Could not set the extra parameters: {exc}"
+    message = "Fixed " + (
+        ", ".join(f"{k}={v:g}" for k, v in accepted.items()) or "nothing"
+    )
+    if ignored:
+        message += (
+            " -- ignored " + ", ".join(ignored)
+            + f", not used by mode {dev.core.mode}"
+        )
+    return message
+
+
+def _gui_hkl_set_fixed(name, presets, extras):
+    """Write the mode's fixed angles and its extra parameters together.
+
+    Two different things, written in one call because the tab shows them in
+    one block and applies them from one debounce timer -- two separate calls
+    would race for the same reply slot and only one message would survive.
+    """
+    messages = [_gui_hkl_set_presets(name, presets)]
+    if extras:
+        messages.append(_gui_hkl_set_extras(name, extras))
+    return "  ".join(messages)
+
+
 def _gui_hkl_set_mode(name, mode):
     """Set the mode and freeze the unused detector angle.
 
     The preset logic follows ``hkl_utils_pete.setmode``: a 'vertical' mode
     holds the horizontal detector (solver 'gamma') at 0 and vice versa,
     translated from solver axis names to this diffractometer's own.
+
+    The detector angle is only defaulted when it has no preset yet.  hklpy2
+    keeps presets *per mode* and restores them when a mode is re-selected, so
+    assigning a fresh dict here would throw away an angle the user had fixed
+    in this mode earlier -- re-picking the mode in the tab would silently undo
+    their setting.
     """
     dev = _gui_hkl_dev(name)
     try:
@@ -325,18 +476,17 @@ def _gui_hkl_set_mode(name, mode):
         solver_det = "delta"
 
     try:
-        if solver_det is None:
-            dev.core.presets = {}
-            return f"Mode: {mode}"
-        mapping = dict(
-            zip(dev.core.solver_real_axis_names, list(dev.real_positioners._fields))
-        )
-        axis = mapping.get(solver_det)
-        if axis is None:
-            dev.core.presets = {}
-            return f"Mode: {mode}"
-        dev.core.presets = {axis: 0}
-        return f"Mode: {mode} (preset {axis}=0)"
+        axis = None
+        if solver_det is not None:
+            mapping = dict(
+                zip(dev.core.solver_real_axis_names, list(dev.real_positioners._fields))
+            )
+            axis = mapping.get(solver_det)
+        presets = dict(dev.core.presets)
+        if axis is not None and axis not in presets:
+            presets[axis] = 0
+            dev.core.presets = presets
+        return f"Mode: {mode} (fixed: {_gui_hkl_presets_text(dev)})"
     except Exception as exc:
         return f"Mode set to {mode}, but presets failed: {exc}"
 
@@ -384,10 +534,26 @@ def _gui_hkl_set_psi(name, psi):
         return f"Could not fix psi: {exc}"
 
 
-def _gui_hkl_calc(name, h, k, l, psi=None):
-    """Compute real angles for an hkl, optionally fixing psi first."""
+def _gui_hkl_calc(name, h, k, l, psi=None, presets=None):
+    """Compute real angles for an hkl, optionally fixing psi and angles first.
+
+    ``presets`` is re-sent with every calculation rather than relied upon from
+    an earlier write: the tab applies fixed angles on a debounce timer, so
+    pressing Calculate straight after typing could otherwise solve against the
+    previous value.
+    """
     dev = _gui_hkl_dev(name)
     out = {"device": name, "h": h, "k": k, "l": l}
+    if presets is not None:
+        try:
+            constant = list(dev.core.constant_axis_names)
+            dev.core.presets = {
+                _k: float(_v) for _k, _v in presets.items() if _k in constant
+            }
+            out["presets"] = {_k: _gui_hkl_f(_v) for _k, _v in dev.core.presets.items()}
+        except Exception as exc:
+            out["error"] = f"Could not fix the angles: {exc}"
+            return out
     if psi is not None and "psi_constant" in dev.core.mode:
         try:
             dev.core.extras = {"psi": float(psi)}

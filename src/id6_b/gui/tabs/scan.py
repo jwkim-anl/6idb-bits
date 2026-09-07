@@ -284,7 +284,11 @@ class ScanTab(BaseTab):
     def on_kernel_state(self, state):
         """Nothing may be launched or edited while a plan is running."""
         self._kernel_idle = state == "idle"
-        if state == "idle" and not self._options:
+        if state == "idle":
+            # Every busy->idle edge, not just the first: a counters() call in
+            # the console is such an edge, and the omit-detectors= rule in
+            # _update_preview compares against this snapshot, so a stale one
+            # decides whether the plan gets an explicit detector list.
             self.refresh()
         if state == "dead":
             self._status.setText("Kernel is not running.")
@@ -295,6 +299,8 @@ class ScanTab(BaseTab):
         options = values.get(OPTIONS_KEY)
         if not isinstance(options, dict):
             return
+        previous = list(self._options.get("detectors_selected") or [])
+        ticked = self._selected_detectors()
         self._options = options
         paths = [p for p, _ in options.get("axes", [])]
         for row in self._axis_rows:
@@ -309,9 +315,13 @@ class ScanTab(BaseTab):
                 item.widget().deleteLater()
         self._detector_boxes.clear()
         selected = set(options.get("detectors_selected") or [])
+        # Follow counters when counters is what changed; otherwise keep the
+        # boxes as the user left them, so refreshing on every idle edge does
+        # not wipe a deliberate deviation.
+        checked = selected if sorted(previous) != sorted(selected) else set(ticked)
         for name in options.get("detector_candidates") or []:
             box = QCheckBox(name)
-            box.setChecked(name in selected)
+            box.setChecked(name in checked)
             box.toggled.connect(self._update_preview)
             self._detector_boxes[name] = box
             self._detector_row.addWidget(box)

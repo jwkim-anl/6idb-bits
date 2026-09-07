@@ -33,6 +33,7 @@ from apsbits.utils.config_loaders import load_config
 from apsbits.utils.helper_functions import register_bluesky_magics
 from apsbits.utils.helper_functions import running_in_queueserver
 from apsbits.utils.logging_setup import configure_logging
+from hklpy2 import ConfigurationRunWrapper
 from hklpy2.backends.hkl_soleil import libhkl
 
 from id6_b.plans.sim_plans import sim_count_plan  # noqa
@@ -81,6 +82,7 @@ import id6_b.utils.run_engine as _re_module  # noqa: E402
 _re_module.RE = RE
 _re_module.bec = bec
 _re_module.peaks = peaks
+_re_module.cat = cat
 
 # NeXus writer — imported for use by local_scans (subscribed per-scan, not globally).
 from .callbacks.nexus_data_file_writer import nxwriter  # noqa: F401, E402
@@ -149,8 +151,50 @@ from id6_b.plans.local_scans import (  # noqa: F401, E402
     mvr,
     rel_grid_scan,
 )
+from id6_b.plans.center_maximum import (  # noqa: F401, E402
+    cen,
+    cen2,
+    com,
+    maxi,
+    maxi2,
+    mini,
+    mini2,
+)
 from id6_b.utils.experiment_utils import (  # noqa: F401, E402
     experiment,
     experiment_change_sample,
     experiment_setup,
 )
+from id6_b.plans.auto_attenuation import (  # noqa: F401, E402
+    attenuation_setup,
+    auto_atten,
+)
+from id6_b.plans.pva_streaming import (  # noqa: F401, E402
+    pva_stream,
+    pva_streaming_setup,
+)
+
+from id6_b.plans.hkl_pv_sync import (  # noqa: F401, E402
+    hkl_pv,
+    hkl_pv_setup,
+)
+
+# The spec-like console API for hklpy2 -- wh, ca, br, ubr, setmode, setaz,
+# setor0/1, compute_UB, and the diffractometer configuration files.  It has to
+# come after make_devices(): the module resolves psic / psic_sim / psic_q /
+# psic_psi out of oregistry at import time, and calls
+# set_diffractometer(psic).  Only the names in its __all__ are bound, so the
+# RunEngine it builds at module scope does not shadow the session's RE.
+from id6_b.utils.hkl_utils_pete import *  # noqa: F401, F403, E402
+
+# add diffractormeter configuration for each scan.
+for dname in ["psic"]:
+    crw = ConfigurationRunWrapper(oregistry[dname])
+    RE.preprocessors.append(crw.wrapper)
+
+# Publish the orientation, detector centre and axis directions to the
+# 6idb1: conversion PVs, and keep them matching.  The first write happens on
+# the watcher's own first tick rather than here: default_settings() runs
+# before the channels are guaranteed connected, and waiting for them would
+# add seconds to every session start whenever that IOC is down.
+hkl_pv.start()

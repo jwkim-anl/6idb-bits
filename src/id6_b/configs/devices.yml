@@ -22,6 +22,7 @@ id6_b.devices.aps_status.StatusAPS:
 
 apstools.devices.mb_creator:
 - name: crl
+  labels: ["crl", "baseline"]
   prefix: "6idbSoft:TRANS:"
   motors: 
     ytrans: "m1"
@@ -39,9 +40,15 @@ apstools.devices.mb_creator:
     lens8: "m13"
     lens9: "m14"
     lens10: "m15"
+- name: mirr1
+  labels: ["mirror", "baseline"]
+  prefix: "6ida1:"
+  motors: 
+    bender: "m39"
 - name: mirror1
+  labels: ["mirror", "baseline"]
   motors:
-    angle:
+    y_angle:
       factory:
         function: "id6_b.devices.pv_positioner.pvpositioner_factory"
         readback_pv: "6idaSoft:M1yt2.C"
@@ -74,6 +81,117 @@ apstools.devices.mb_creator:
         readback_pv: "6idaSoft:M1yt2.B"
         setpoint_pv: "6idaSoft:M1yup"
         done_pv: "6idaSoft:M1yDMOV"
+        done_value: 1
+        stop_pv: "6idaSoft:allstop"
+        stop_value: 1
+    x_angle:
+      factory:
+        function: "id6_b.devices.pv_positioner.pvpositioner_factory"
+        readback_pv: "6idaSoft:M1xt2.C"
+        setpoint_pv: "6idaSoft:M1xangl"
+        done_pv: "6idaSoft:M1xDMOV"
+        done_value: 1
+        stop_pv: "6idaSoft:allstop"
+        stop_value: 1
+    x_avg:
+      factory:
+        function: "id6_b.devices.pv_positioner.pvpositioner_factory"
+        readback_pv: "6idaSoft:M1xt2.D"
+        setpoint_pv: "6idaSoft:M1xavg"
+        done_pv: "6idaSoft:M1xDMOV"
+        done_value: 1
+        stop_pv: "6idaSoft:allstop"
+        stop_value: 1
+    x_down:
+      factory:
+        function: "id6_b.devices.pv_positioner.pvpositioner_factory"
+        readback_pv: "6idaSoft:M1xt2.A"
+        setpoint_pv: "6idaSoft:M1xdn"
+        done_pv: "6idaSoft:M1xDMOV"
+        done_value: 1
+        stop_pv: "6idaSoft:allstop"
+        stop_value: 1
+    x_up:
+      factory:
+        function: "id6_b.devices.pv_positioner.pvpositioner_factory"
+        readback_pv: "6idaSoft:M1xt2.B"
+        setpoint_pv: "6idaSoft:M1xup"
+        done_pv: "6idaSoft:M1xDMOV"
+        done_value: 1
+        stop_pv: "6idaSoft:allstop"
+        stop_value: 1
+- name: mirror2
+  labels: ["mirror", "baseline"]
+  motors:
+    y_angle:
+      factory:
+        function: "id6_b.devices.pv_positioner.pvpositioner_factory"
+        readback_pv: "6idaSoft:M2yt2.C"
+        setpoint_pv: "6idaSoft:M2yangl"
+        done_pv: "6idaSoft:M2yDMOV"
+        done_value: 1
+        stop_pv: "6idaSoft:allstop"
+        stop_value: 1
+    y_avg:
+      factory:
+        function: "id6_b.devices.pv_positioner.pvpositioner_factory"
+        readback_pv: "6idaSoft:M2yt2.D"
+        setpoint_pv: "6idaSoft:M2yavg"
+        done_pv: "6idaSoft:M2yDMOV"
+        done_value: 1
+        stop_pv: "6idaSoft:allstop"
+        stop_value: 1
+    y_down:
+      factory:
+        function: "id6_b.devices.pv_positioner.pvpositioner_factory"
+        readback_pv: "6idaSoft:M2yt2.A"
+        setpoint_pv: "6idaSoft:M2ydn"
+        done_pv: "6idaSoft:M2yDMOV"
+        done_value: 1
+        stop_pv: "6idaSoft:allstop"
+        stop_value: 1
+    y_up:
+      factory:
+        function: "id6_b.devices.pv_positioner.pvpositioner_factory"
+        readback_pv: "6idaSoft:M2yt2.B"
+        setpoint_pv: "6idaSoft:M2yup"
+        done_pv: "6idaSoft:M2yDMOV"
+        done_value: 1
+        stop_pv: "6idaSoft:allstop"
+        stop_value: 1
+    x_angle:
+      factory:
+        function: "id6_b.devices.pv_positioner.pvpositioner_factory"
+        readback_pv: "6idaSoft:M2xt2.C"
+        setpoint_pv: "6idaSoft:M2xangl"
+        done_pv: "6idaSoft:M2xDMOV"
+        done_value: 1
+        stop_pv: "6idaSoft:allstop"
+        stop_value: 1
+    x_avg:
+      factory:
+        function: "id6_b.devices.pv_positioner.pvpositioner_factory"
+        readback_pv: "6idaSoft:M2xt2.D"
+        setpoint_pv: "6idaSoft:M2xavg"
+        done_pv: "6idaSoft:M2xDMOV"
+        done_value: 1
+        stop_pv: "6idaSoft:allstop"
+        stop_value: 1
+    x_down:
+      factory:
+        function: "id6_b.devices.pv_positioner.pvpositioner_factory"
+        readback_pv: "6idaSoft:M2xt2.A"
+        setpoint_pv: "6idaSoft:M2xdn"
+        done_pv: "6idaSoft:M2xDMOV"
+        done_value: 1
+        stop_pv: "6idaSoft:allstop"
+        stop_value: 1
+    x_up:
+      factory:
+        function: "id6_b.devices.pv_positioner.pvpositioner_factory"
+        readback_pv: "6idaSoft:M2xt2.B"
+        setpoint_pv: "6idaSoft:M2xup"
+        done_pv: "6idaSoft:M2xDMOV"
         done_value: 1
         stop_pv: "6idaSoft:allstop"
         stop_value: 1
@@ -180,6 +298,15 @@ apstools.devices.mb_creator:
     hsize: "m6"   # SL4_HGap
     vcen: "m7"    # SL4_VCEN
     vsize: "m8"   # SL4_VGap
+# white beam slits in A-station
+- name: wbslit
+  prefix: "6idaSoft:ACS-A1:"
+  labels: ["wbslit", "baseline"]
+  motors:
+    horizontal: "m1"    # white beam slit horizontal
+    diagonal: "m2"   # white beam slit diagonal
+    pitch: "m3"    # white beam slit pitch
+    yaw: "m4"   # white beam slit yaw
 
 # --- Sample environment / table motor bundles ---------------------------
 - name: opty2
@@ -237,6 +364,24 @@ id6_b.devices.filters.FilterBank:
 - name: filters
   prefix: "6idb1:filter:"
   labels: ["filters", "baseline"]
+
+# PVA streaming cache control: ScanOn / FileName / FilePath.
+# Not "baseline" -- the two path PVs are strings, which buy nothing in the
+# baseline stream, and the streaming server is not always running.
+id6_b.devices.pva_streaming.PvaStreamControl:
+- name: pva_stream
+  prefix: "6idb1:"
+  labels: ["pva_stream"]
+
+# The HKL-conversion PVs the area-detector analysis reads: UB matrix, detector
+# centre channel and distance, and the sign convention of every axis.  Written
+# by plans/hkl_pv_sync.py.  Not "baseline" -- these describe a run rather than
+# being measured by it, and the two waveforms could not go in an event
+# descriptor anyway.
+id6_b.devices.hkl_pvs.HklConversionPVs:
+- name: hkl_pvs
+  prefix: "6idb1:"
+  labels: ["hkl_pvs", "baseline"]
 
 id6_b.devices.keithley.Keithley2400:
 - name: keithley2400
@@ -309,6 +454,22 @@ hklpy2.creator:
     nu: m29
     delta: m18
 
+# LakeShoure 340 temperature controller
+apstools.devices.LakeShore340Device:
+- name: temp340
+  prefix: "6idb1:LS340:TC1:"
+  labels: ["temperature", "baseline"]
+
+# B station shutters
+#apstools.devices.ApsPssShutterWithStatus:
+#- name: bshutter
+#  prefix: ""
+#  state_pv: "PB:06ID:STA_B_SBS_CLSD_PL.VAL"
+#  open_pv: "6ida1:AcO6"
+#  close_pv: "6ida1:AcO5"
+#  labels: ["shutter", "baseline"]
+
+
 # --- Ported from bluesky/instrument/devices but IOC not reachable ------
 # Each of these was probed with caget and did not connect.  Uncomment (and
 # for pilatus/vortex, add the device module) once the IOC is running.
@@ -370,11 +531,7 @@ hklpy2.creator:
 
 # FIXME: control object fails to load properly
 # TODO: after BITS version is upgraded (includes startup.py updates)
-#id6_b.devices.lakeshore_controllers.LS340Device:
-#- name: lakeshore340
-#  # Lakeshore 340 - Low temperature
-#  prefix: "6idb1:LS340:TC1:"
-#  labels: ["lakeshore", "baseline"]
+
 
 id6_b.devices.lambda_detector.Lambda250kDetector:
 - name: lambda250k

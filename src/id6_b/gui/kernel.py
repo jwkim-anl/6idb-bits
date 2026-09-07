@@ -22,9 +22,12 @@ Status comes from two sources, because the kernel is not always reachable:
 """
 
 import ast
+import json
 import logging
+import os
 import queue
 import time
+from collections import deque
 from pathlib import Path
 
 import yaml
@@ -34,7 +37,15 @@ from qtpy.QtCore import QObject
 from qtpy.QtCore import QTimer
 from qtpy.QtCore import Signal
 
+from ..mcp_server.bridge import MCP_HELPERS_CODE
+from ..mcp_server.motion import MOTION_HELPERS_CODE
+from ..mcp_server.session import POINTER_NAME
+from .atten_bridge import ATTEN_HELPERS_CODE
 from .hkl_bridge import HKL_HELPERS_CODE
+from .hkl_config_bridge import HKL_CONFIG_HELPERS_CODE
+from .pva_bridge import PVA_HELPERS_CODE
+from .session_setup import SESSION_SETUP_CODE
+from .spec_bridge import SPEC_HELPERS_CODE
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +161,14 @@ def _gui_set_kinds(changes):
             applied.append((_dev, _chan, _sig.kind.name))
         except Exception as _exc:
             print(f"Could not set {_dev}.{_chan} to {_kind}: {_exc}")
+    if applied:
+        # counters.select_plot_channels sets Kind and the detector list in one
+        # go; setting Kind on its own would leave a detector counted with
+        # nothing hinted, so re-derive the pairing here.
+        try:
+            counters.sync_selection()
+        except Exception as _exc:
+            print(f"Could not update the counters selection: {_exc}")
     return applied
 
 
@@ -200,6 +219,13 @@ def _gui_scan_options():
     Detectors: only those with ``preset_monitor``.  ``configure_counts_wrapper``
     calls ``rd(det.preset_monitor)`` on every detector, so anything else raises
     ``AttributeError`` when scanned.
+
+    ``axis_fields`` maps each axis's *hinted field* back to its dotted path,
+    which is what the Scan plot tab's peak buttons need: a scan's x axis is
+    named in the documents by its hinted field (``psic_h``), not by its path
+    (``psic.h``).  It falls out of the same walk, so it costs no extra
+    round-trip -- and because containers are skipped here, only leaves appear,
+    which is exactly the disambiguation the plans have to do the hard way.
     """
     from ophyd import Signal
 
@@ -209,12 +235,17 @@ def _gui_scan_options():
         except Exception:
             return False
 
-    axes, seen = [], set()
+    axes, seen, fields = [], set(), {}
 
     def _add(obj, path):
         if path not in seen:
             seen.add(path)
             axes.append((path, type(obj).__name__))
+            try:
+                for _f in obj.hints.get("fields", ()):
+                    fields.setdefault(_f, path)
+            except Exception:
+                pass
 
     for _d in sorted(oregistry.root_devices, key=lambda d: d.name):
         _has_axis_children = False
@@ -246,10 +277,30 @@ def _gui_scan_options():
 
     return {
         "axes": axes,
+        "axis_fields": fields,
         "detector_candidates": candidates,
         "detectors_selected": selected,
         "monitor": monitor,
     }
+
+
+def _gui_peak_fields():
+    """Return the detector *field* names the last scan can give a peak for.
+
+    Suggestions only: the Macro tab's Peak component takes free text, because
+    a macro is usually written before the scan whose peak it will use.
+
+    Read through ``center_maximum`` rather than off ``bec.peaks`` so the list
+    is exactly what ``cen()`` will accept -- and because ``peaks`` is filled in
+    asynchronously under a Qt backend (see ``plans/center_maximum.py``).
+    """
+    from id6_b.plans.center_maximum import _hinted_detectors
+    from id6_b.utils import run_engine as _re
+
+    try:
+        return sorted(_hinted_detectors(_re.cat[-1]))
+    except Exception:
+        return []
 
 
 def _gui_macro_targets(name):
@@ -334,6 +385,39 @@ def _gui_set_extra_kinds(changes):
         except Exception as _exc:
             print(f"Could not set {_dev}.{_dotted} to {_kind}: {_exc}")
     return applied
+
+
+def _gui_set_metadata(login_id=None, proposal_id=None):
+    """Set the user and proposal recorded in every later run's start document.
+
+    Backs the Session tab's *Run metadata* group.  A blank or omitted value
+    leaves that key alone, so changing one of the two is one field.
+
+    Prints its report and returns None: it goes out through the console, where
+    a return value would only add an ``Out[n]`` above the lines worth reading.
+    """
+    _changed = []
+    for _key, _value in (("login_id", login_id), ("proposal_id", proposal_id)):
+        _value = "" if _value is None else str(_value).strip()
+        if not _value:
+            continue
+        try:
+            RE.md[_key] = _value
+        except Exception as _exc:
+            print(f"Could not set {_key}: {_exc}")
+            continue
+        _changed.append(f"{_key} = {_value!r}")
+
+    if not _changed:
+        print("Run metadata unchanged.")
+        return
+    print("Run metadata: " + ", ".join(_changed))
+    print(
+        "  Recorded in every run started from now on.  Reset at the next "
+        "session start -- proposal_id comes from iconfig.yml's RUN_ENGINE "
+        "DEFAULT_METADATA, login_id is recomputed from the login -- so edit "
+        "iconfig.yml to change them for good."
+    )
 '''
 
 #: RunEngine metadata autosave, resolved against the kernel's working
@@ -341,6 +425,12 @@ def _gui_set_extra_kinds(changes):
 MD_FILENAME = ".re_md_dict.yml"
 
 POLL_INTERVAL_MS = 1000
+
+#: How many of the poller's own request ids to remember, so their iopub echoes
+#: can be told apart from the session's traffic.  One request goes out every
+#: :data:`POLL_INTERVAL_MS`, so only the most recent few can still have replies
+#: in flight; the rest is slack for ``execute_once`` bursts.
+OWN_REQUEST_MEMORY = 64
 
 #: Evaluated in the kernel when it is idle.  Each entry reports its own
 #: ``status``, so one failing expression never blanks the others --
@@ -350,9 +440,17 @@ KERNEL_EXPRESSIONS = {
     "re_state": "RE.state",
     "spec_file": "str(specwriter.spec_filename)",
     "sample": "experiment.sample",
+    # The Session tab's Files group, and what local_scans builds
+    # <base>_00001_master.hdf from.  A plain attribute read -- the New data
+    # file group's richer preview is a one-off request, not a polled one.
+    "base_name": "experiment.file_base_name",
     "exp_path": "str(experiment.experiment_path)",
     "n_runs": "len(cat)",
     "cwd": "__import__('os').getcwd()",
+    # The Agent tab's whole state: the request an MCP client has parked, the
+    # recent outcomes, and whether motion requests are switched off.  Polled
+    # with the rest rather than by a reader of its own.
+    "mcp_pending": "_gui_mcp_pending_info()",
 }
 
 
@@ -378,6 +476,8 @@ class KernelSession(QObject):
         self.manager = None
         self.client = None
         self.poll_client = None
+        #: Where this session advertises its kernel for the MCP server.
+        self.pointer_path = None
         self._ready_timer = None
         self._ready_deadline = 0.0
         self._ready_last_request = 0.0
@@ -408,7 +508,46 @@ class KernelSession(QObject):
         self.poll_client.load_connection_file(self.manager.connection_file)
         self.poll_client.start_channels()
 
+        self._write_pointer()
         return self.manager, self.client
+
+    def _write_pointer(self):
+        """Advertise this kernel to the MCP server.
+
+        A small file in the kernel's own working directory, so a server started
+        anywhere inside the session's directory tree finds it by walking up.
+        Deliberately not ``jupyter_client``'s runtime directory, whose newest
+        entry may be an unrelated notebook -- attaching to the wrong kernel is
+        the one failure this must not have.
+        """
+        self.pointer_path = Path(self.cwd) / POINTER_NAME
+        try:
+            self.pointer_path.write_text(
+                json.dumps(
+                    {
+                        "connection_file": self.manager.connection_file,
+                        "pid": os.getpid(),
+                        "started": time.time(),
+                        "cwd": self.cwd,
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
+        except OSError:
+            # A read-only session directory costs the MCP server, nothing else.
+            logger.warning("Could not write %s.", self.pointer_path, exc_info=True)
+            self.pointer_path = None
+
+    def _remove_pointer(self):
+        """Withdraw the advertisement, so nothing attaches to a dead kernel."""
+        if self.pointer_path is None:
+            return
+        try:
+            self.pointer_path.unlink(missing_ok=True)
+        except OSError:
+            logger.debug("Could not remove %s.", self.pointer_path, exc_info=True)
+        self.pointer_path = None
 
     def wait_until_ready(self, timeout_s=180.0):
         """Emit :attr:`ready` once the kernel answers, without blocking.
@@ -482,9 +621,25 @@ class KernelSession(QObject):
         publisher subscription) could arrive before the import and fail on a
         missing ``RE``.  It is appended to this same cell for that reason.
         """
-        parts = [BOOTSTRAP_CODE, HELPERS_CODE, HKL_HELPERS_CODE]
+        parts = [
+            BOOTSTRAP_CODE,
+            HELPERS_CODE,
+            HKL_HELPERS_CODE,
+            HKL_CONFIG_HELPERS_CODE,
+            MCP_HELPERS_CODE,
+            MOTION_HELPERS_CODE,
+            ATTEN_HELPERS_CODE,
+            PVA_HELPERS_CODE,
+            SPEC_HELPERS_CODE,
+        ]
         if follow_up_code:
             parts.append(follow_up_code)
+
+        # Last: after the devices exist, and after the live-plot subscription,
+        # so a bad AUTO_SETUP block cannot cost the plotting.  Being last also
+        # leaves the experiment/counters summary on screen once the ~40 s of
+        # device-loading log has scrolled past.
+        parts.append(SESSION_SETUP_CODE)
 
         # The prompt is live while this runs, where ``console.execute()`` used
         # to block it, so say what is happening: a command typed now is queued
@@ -524,6 +679,7 @@ class KernelSession(QObject):
 
     def shutdown(self):
         """Stop the readiness timer and both clients, then kill the kernel."""
+        self._remove_pointer()
         if self._ready_timer is not None:
             self._ready_timer.stop()
         for client in (self.poll_client, self.client):
@@ -547,6 +703,12 @@ class StatusPoller(QObject):
     kernel_values_changed = Signal(dict)
     kernel_state_changed = Signal(str)
 
+    #: One broadcast iopub message, everything the console renders included.
+    #: Messages the poller itself provoked are filtered out first, so a
+    #: subscriber sees the session and not the GUI's own housekeeping.  Used by
+    #: the console transcript; see :mod:`id6_b.gui.transcript`.
+    iopub_message = Signal(dict)
+
     def __init__(self, session, parent=None):
         """Poll state for *session*, a started :class:`KernelSession`."""
         super().__init__(parent)
@@ -557,6 +719,9 @@ class StatusPoller(QObject):
         self._state = None
         self._pending = None
         self._once = {}
+        # msg_ids of requests this poller sent.  Bounded because one goes out
+        # every second: only the most recent can still have replies in flight.
+        self._own_requests = deque(maxlen=OWN_REQUEST_MEMORY)
 
         self._timer = QTimer(self)
         self._timer.setInterval(POLL_INTERVAL_MS)
@@ -589,10 +754,17 @@ class StatusPoller(QObject):
         self._emit_state()
 
     def _drain_iopub(self):
-        """Consume broadcast messages to track kernel busy/idle.
+        """Consume broadcast messages to track kernel busy/idle, and re-emit.
 
         iopub is broadcast to every client, so this sees execution driven from
-        the console even though it runs on the poll client.
+        the console even though it runs on the poll client -- which is what
+        makes it the capture point for the console transcript.  Anything this
+        poller provoked itself is dropped first: :meth:`_poll_kernel` has to
+        send ``silent=False`` (or ``user_expressions`` are ignored), so the
+        kernel broadcasts an ``execute_input`` for an empty cell once a second,
+        and a subscriber must not see it.  The bootstrap is deliberately *not*
+        filtered -- it goes out on the console's client, and its device-loading
+        log is worth keeping.
         """
         client = self._session.poll_client
         if client is None:
@@ -608,6 +780,10 @@ class StatusPoller(QObject):
                 state = msg.get("content", {}).get("execution_state")
                 if state in ("busy", "idle"):
                     self._busy = state == "busy"
+            parent = (msg.get("parent_header") or {}).get("msg_id")
+            if parent in self._own_requests:
+                continue
+            self.iopub_message.emit(msg)
 
     def _read_metadata_file(self):
         """Re-read the RunEngine metadata file when it changes on disk."""
@@ -637,10 +813,16 @@ class StatusPoller(QObject):
         if client is None:
             return False
         try:
-            client.execute(code, silent=True, store_history=False, allow_stdin=False)
+            msg_id = client.execute(
+                code, silent=True, store_history=False, allow_stdin=False
+            )
         except Exception:  # noqa: BLE001 - caller decides how to report
             logger.exception("Could not execute %r in the kernel.", code[:80])
             return False
+        # Silent, so there is no execute_input to hide -- but a failing
+        # statement still broadcasts an `error`, and a GUI-internal traceback
+        # has no place in the console transcript.
+        self._own_requests.append(msg_id)
         return True
 
     def request_once(self, expressions):
@@ -680,6 +862,7 @@ class StatusPoller(QObject):
         except Exception:  # noqa: BLE001 - kernel may be restarting
             self._pending = None
         else:
+            self._own_requests.append(self._pending)
             self._once.clear()
 
     def _collect_reply(self, client):

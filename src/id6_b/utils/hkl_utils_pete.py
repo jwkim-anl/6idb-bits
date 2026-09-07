@@ -29,6 +29,9 @@ Auxilary HKL functions.
     ~freeze
     ~freeze_psi
     ~wh
+    ~write_diffractometer_config_file
+    ~read_diffractometer_config_file
+    ~read_diffractometer_config_scan
 """
 """
 Provide a simplified UI for hklpy2 diffractometer users.
@@ -66,16 +69,29 @@ __all__ = """
     setaz
     freeze
     freeze_psi
+    wh
+    write_diffractometer_config_file
+    read_diffractometer_config_file
+    read_diffractometer_config_scan
+    export_diffractometer_config
+    apply_diffractometer_config
+    scan_diffractometer_configs
 """.split()
 
 try:
     from hklpy2.user import set_diffractometer, get_diffractometer, cahkl, add_sample
+    from hklpy2.run_utils import get_run_orientation
     from bluesky import RunEngine, RunEngineInterrupted
     from bluesky.utils import ProgressBarManager
     import asyncio
+    import pathlib
     from bluesky.plan_stubs import mv
     from apsbits.core.instrument_init import oregistry
     import numpy as np
+    import yaml
+    # The module, not the name: startup.py fills `cat` in after this module
+    # could have been imported, and a from-import would freeze it at None.
+    from . import run_engine as _re_module
 except ModuleNotFoundError:
     print("gi module is not installed, the hkl_utils functions will not work!")
 
@@ -887,6 +903,7 @@ def _wh():
     _geom_ = get_diffractometer()
     _geom_for_psi_ = geometries.psi
     _geom_for_psi_.sample.UB = _geom_.sample.UB
+    _geom_for_psi_.sample.lattice = _geom_.sample.lattice
     _geom_for_q_ = geometries.q2
     print(
         f"\n   {' '.join(_geom_.pseudo_positioners._fields).upper()}"
@@ -919,7 +936,24 @@ def _wh():
             _geom_for_q_.inverse(0).q, tth_from_q
         )
     )
- 
+
+class whClass:
+    """
+    _wh function used without parenthesis
+    """
+
+    def __repr__(self):
+        print("")
+        try:
+            _wh()
+        except Exception:
+            pass
+        return ""
+
+
+wh = whClass()
+
+
 def _ensure_idle():
     if  RE.state != 'idle':
         print('The RunEngine invoked by magics cannot be resumed.')
@@ -1189,5 +1223,318 @@ def freeze_psi(*args):
                 _geom_.core.mode
             )
         )
- 
 
+
+#: Suffix of the files write/read_diffractometer_config_file work with.
+#: Everything matching ``*_6idb_config.yml`` in the working directory is
+#: offered by the reader, so the suffix is what makes a configuration file
+#: recognisable as one.
+CONFIG_SUFFIX = "_6idb_config.yml"
+
+#: Comment written into the header of an exported configuration.
+CONFIG_COMMENT = "6-ID-B beamline"
+
+
+def _psi_geometry():
+    """The psi-mode geometry, or None with a warning if it is not registered.
+
+    The POLAR original looks this up as ``oregistry.find(name + "_psi")``,
+    which cannot work here: 6-ID-B registers a single ``psic_psi`` for the
+    real motors, so ``psic_sim`` has no ``psic_sim_psi`` twin and the lookup
+    would raise on the simulator.  The purpose is the same -- surface a
+    missing psi geometry at restore time rather than later inside
+    ``compute_UB()`` or a scan plan.
+    """
+    geom = geometries.psi
+    if geom is None:
+        print(
+            "! No psi geometry is registered; psi readouts and the "
+            "psi_constant modes will not work until one is."
+        )
+    return geom
+
+
+def _recompute_ub(diffractometer):
+    """Recompute UB from the current sample's orienting pair, if it has one.
+
+    A restored configuration is trusted for everything except the UB matrix,
+    which is recomputed from the reflections rather than taken from the file --
+    a stored matrix can disagree with the reflections it was supposedly built
+    from.  But a sample is allowed to have fewer than two reflections: a
+    lattice can be entered long before the first peak is found, and hklpy2
+    stores a default UB (2*pi*B) for it.  Recomputing unconditionally, which is
+    what the POLAR original does, raises `IndexError: list index out of range`
+    out of `reflections.order[0]` in exactly that case -- and it is the
+    configuration most likely to be restored first.
+
+    So the orienting pair is checked, and when it is not there the restored UB
+    is kept and the reason is said out loud rather than being left to be
+    discovered from a traceback.  Takes the diffractometer explicitly because
+    `compute_UB()` resolves `get_diffractometer()`, which is not necessarily
+    the device that was just restored.
+    """
+    sample = diffractometer.sample
+    order = list(sample.reflections.order)
+    if len(order) < 2:
+        print(
+            f"! Sample '{sample.name}' has {len(order)} orienting "
+            f"reflection(s); UB needs two. Keeping the UB from the restored "
+            f"configuration. Add reflections and run compute_UB() to replace it."
+        )
+        return
+    print("Computing UB!")
+    sample.core.calc_UB(order[0], order[1])
+    diffractometer.forward(1, 0, 0)
+
+
+def export_diffractometer_config(diffractometer, path):
+    """
+    Write *diffractometer*'s configuration to *path*.  No prompts.
+
+    The non-interactive half of :func:`write_diffractometer_config_file`,
+    split out so the GUI -- whose kernel runs with ``allow_stdin=False`` and
+    would hang on an ``input()`` -- writes exactly the same file the console
+    does, with the same header comment.
+
+    Parameters
+    ----------
+    diffractometer : hklpy2 diffractometer
+        The device to export.  Passed explicitly rather than resolved with
+        ``get_diffractometer()``: the GUI has its own psic/psic_sim selector.
+    path : str or pathlib.Path
+        Where to write.  Used as given -- no suffix is appended and no
+        existing file is checked for, both of which are the caller's job.
+    """
+    diffractometer.export(str(path), comment=CONFIG_COMMENT)
+
+
+def apply_diffractometer_config(diffractometer, config, clear=True):
+    """
+    Restore *config* onto *diffractometer*, then recompute UB.  No prompts.
+
+    The tail both readers share, in one place so the ``restore()`` keywords,
+    the psi-geometry check and the guarded UB recompute cannot drift apart.
+
+    Parameters
+    ----------
+    diffractometer : hklpy2 diffractometer
+        The device to restore onto.
+    config : str, pathlib.Path or dict
+        A configuration file's path, or the dict a scan saved.  hklpy2's
+        ``restore()`` takes either.
+    clear : bool, optional
+        True (the default) replaces the current configuration, False adds to
+        it -- hklpy2's own ``clear`` argument, and its own default.
+    """
+    # hklpy2 changed restore() defaults: on hardware-backed diffractometers
+    # `restore_samples` / `restore_extras` default to False.  Pass them
+    # explicitly so the samples and azimuthal-reference extras are actually
+    # applied.  Wavelength and mode are intentionally left at the current
+    # values to avoid silently retargeting motors.
+    diffractometer.restore(
+        config,
+        clear=clear,
+        restore_samples=True,
+        restore_extras=True,
+        restore_constraints=True,
+    )
+    # Surface a missing psi-mode geometry here, then recompute UB from the
+    # restored reflections rather than trusting the stored matrix.
+    _psi_geometry()
+    _recompute_ub(diffractometer)
+
+
+def scan_diffractometer_configs(scan_id):
+    """
+    The hklpy2 configurations saved in a scan, keyed by diffractometer name.
+
+    The catalog half of :func:`read_diffractometer_config_scan`, split out so
+    a caller that already knows which diffractometer it wants -- the GUI picks
+    one from a list it has shown -- does not have to answer a prompt.
+
+    Parameters
+    ----------
+    scan_id : int or str
+        Scan number or uid, looked up in the databroker catalog.
+
+    Returns
+    -------
+    dict
+        ``{diffractometer_name: configuration}``, never empty.
+
+    Raises
+    ------
+    RuntimeError
+        The catalog is not available, i.e. the startup has not run.
+    ValueError
+        The scan holds no hklpy2 configuration at all.
+    """
+    cat = getattr(_re_module, "cat", None)
+    if cat is None:
+        raise RuntimeError(
+            "No catalog is available; run the id6_b startup before reading a "
+            "configuration back out of a scan."
+        )
+
+    run = cat[scan_id]
+    info = get_run_orientation(run)
+    if not info:
+        uid = run.metadata["start"]["uid"]
+        raise ValueError(
+            f"The scan #{scan_id} ({uid = }) does not have any hklpy2 "
+            "configuration saved."
+        )
+    return info
+
+
+def write_diffractometer_config_file(filename="default", overwrite=False):
+    """
+    Write the current diffractometer configuration to a YAML file.
+
+    The file holds the samples, their lattices and reflections, the UB
+    matrix, the mode, the constraints and the extras -- everything
+    :func:`read_diffractometer_config_file` needs to put the session back.
+
+    Parameters
+    ----------
+    filename : str, optional
+        Base name of the file.  ``CONFIG_SUFFIX`` is appended, so the
+        default writes ``default_6idb_config.yml`` in the current directory.
+    overwrite : bool, optional
+        Overwrite an existing file without asking.  Defaults to False, in
+        which case an existing file prompts for confirmation.
+    """
+    _geom_ = get_diffractometer()
+    file = pathlib.Path(f"{filename}{CONFIG_SUFFIX}")
+    if file.exists() and not overwrite:
+        answer = input(f"File '{file}' already exists. Overwrite? ([y]/n): ")
+        if answer.strip().lower() == "n":
+            print("Configuration file not written.")
+            return
+    export_diffractometer_config(_geom_, file)
+    print(f"Configuration written to '{file}'.")
+
+
+def _prompt_clear_mode(config, source="file"):
+    """
+    Ask whether to replace the current configuration or add to it.
+
+    Parameters
+    ----------
+    config : dict
+        The configuration about to be loaded, read for the sample names it
+        would bring in so they can be listed before anything is applied.
+    source : str, optional
+        What to call the configuration in the prompt ("file" or
+        "configuration").
+
+    Returns
+    -------
+    bool or None
+        True to overwrite, False to append, None if the user cancelled.
+    """
+    file_samples = [k for k in config.get("samples", {}) if k != "sample"]
+    if file_samples:
+        print(f"\nSamples in this {source}:")
+        for s in file_samples:
+            print(f"  {s}")
+    else:
+        print(f"\nNo user-defined samples found in this {source}.")
+
+    mode = (
+        input("\nOverwrite current configuration or append? ([o]verwrite/[a]ppend): ")
+        .strip()
+        .lower()
+    )
+    if mode == "a":
+        return False
+    elif mode == "o":
+        return True
+    print("Configuration not loaded.")
+    return None
+
+
+def read_diffractometer_config_file():
+    """
+    Restore a diffractometer configuration from a YAML file.
+
+    Lists every ``*_6idb_config.yml`` in the current directory, asks which
+    one, asks whether to overwrite or append to the current configuration,
+    then applies it and recomputes the UB matrix.
+    """
+    _geom_ = get_diffractometer()
+
+    files = sorted(pathlib.Path(".").glob(f"*{CONFIG_SUFFIX}"))
+    if not files:
+        print(f"No *{CONFIG_SUFFIX} files found in current directory.")
+        return
+
+    default_file = pathlib.Path(f"default{CONFIG_SUFFIX}")
+    default_idx = next((i for i, f in enumerate(files) if f == default_file), 0)
+
+    print("\nAvailable configuration files:")
+    for i, f in enumerate(files):
+        marker = " (default)" if f == default_file else ""
+        print(f"  {i}: {f}{marker}")
+
+    answer = input(f"\nSelect file to load [{default_idx}]: ").strip()
+    try:
+        idx = int(answer) if answer else default_idx
+        file = files[idx]
+    except (ValueError, IndexError):
+        print("Invalid selection. Configuration not loaded.")
+        return
+
+    with open(file) as f:
+        config = yaml.safe_load(f)
+
+    clear = _prompt_clear_mode(config, source="file")
+    if clear is None:
+        return
+
+    print(f"Loading '{file}'...")
+    apply_diffractometer_config(_geom_, str(file), clear=clear)
+
+
+def read_diffractometer_config_scan(scan_id, diffractometer=None, clear=None):
+    """
+    Restore the diffractometer orientation saved with a previous scan.
+
+    Parameters
+    ----------
+    scan_id : int or str
+        Scan number or uid, looked up in the databroker catalog.
+    diffractometer : hklpy2 diffractometer, optional
+        Which diffractometer's configuration to restore.  Defaults to the
+        current one; if the scan does not hold that one, the available names
+        are listed and one is asked for.
+    clear : bool, optional
+        True replaces the current configuration, False adds to it.  If None
+        (the default) the question is asked interactively.
+    """
+    info = scan_diffractometer_configs(scan_id)
+
+    if diffractometer is None:
+        diffractometer = get_diffractometer()
+    name = diffractometer.name
+
+    labels = list(info.keys())
+    if name not in labels:
+        print(f"{name} was not found in the scan #{scan_id}.")
+        print("Available options are: ")
+        for label in labels:
+            print(label)
+        name = input(f"Enter diffractometer name ({labels[0]}): ") or labels[0]
+        if name not in labels:
+            raise ValueError(
+                f"'{name}' is not in scan #{scan_id}. Available: {', '.join(labels)}."
+            )
+
+    config = info[name]
+
+    if clear is None:
+        clear = _prompt_clear_mode(config, source="configuration")
+        if clear is None:
+            return
+
+    apply_diffractometer_config(diffractometer, config, clear=clear)

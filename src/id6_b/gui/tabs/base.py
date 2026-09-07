@@ -55,6 +55,12 @@ class BaseTab(QWidget):
     #: default to somewhere under it rather than to the GUI process's cwd.
     session_cwd = None
 
+    #: Set by MainWindow to the shared :class:`~id6_b.gui.transcript.
+    #: ConsoleTranscript`, which appends the console's traffic to a file.  The
+    #: Session tab drives it; other tabs may read ``transcript.path`` and
+    #: ``transcript.active`` to report on it.
+    transcript = None
+
     def run_in_console(self, code):
         """Run *code* in the console, as though the user had typed it."""
         if self.console_execute is None:
