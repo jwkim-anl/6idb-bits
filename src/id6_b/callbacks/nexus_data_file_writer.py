@@ -36,7 +36,7 @@ class MyNXWriter(NXWriterAPS):
 
     def write_root(self, filename):
         super().write_root(filename)
-        self.root.attrs["NeXus_version"] = NEXUS_RELEASE
+        self.root.attrs["NeXus_release"] = NEXUS_RELEASE
         self.root.attrs["layout_version"] = LAYOUT_VERSION
 
     def write_entry(self):
