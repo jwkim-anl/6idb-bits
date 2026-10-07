@@ -46,12 +46,14 @@ class MyNXWriter(NXWriterAPS):
         ds.attrs["target"] = ds.name
         nxentry["instrument/layout_version"] = ds
 
-        for name, path in self.external_files.items():
-            link_path = (
-                "/stream" if name == "positioner_stream" else "/entry/instrument"
-            )
-            h5addr = f"/entry/externals/{name}"
-            self.root[h5addr] = h5py.ExternalLink(str(path), link_path)
+        if len(self.external_files) > 0:
+            self.create_NX_group(self.root["/entry"], "externals:NXnote")
+            for name, path in self.external_files.items():
+                link_path = (
+                    "/stream" if name == "positioner_stream" else "/entry/instrument"
+                )
+                h5addr = f"/entry/externals/{name}"
+                self.root[h5addr] = h5py.ExternalLink(str(path), link_path)
 
         self.external_files = {}
 
